@@ -212,26 +212,22 @@ fn launch(
             }
 
             // Check for queued message and deliver it as a resume
-            if let Some(ref name) = session_name {
-                if let Ok(Some((prompt, cwd))) = db.take_queued_message(name) {
-                    // Use the queued cwd, falling back to the original session's cwd
-                    let resume_cwd = if cwd.is_empty() {
-                        &cwd_for_thread
-                    } else {
-                        &cwd
-                    };
-                    eprintln!("Delivering queued message for session {name}...");
-                    match resume(&sid, &prompt, resume_cwd) {
-                        Ok(new_id) => {
-                            eprintln!(
-                                "Queued message delivered: session {name} resumed ({new_id})"
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "Failed to deliver queued message for session {name}: {e}"
-                            );
-                        }
+            if let Some(ref name) = session_name
+                && let Ok(Some((prompt, cwd))) = db.take_queued_message(name)
+            {
+                // Use the queued cwd, falling back to the original session's cwd
+                let resume_cwd = if cwd.is_empty() {
+                    &cwd_for_thread
+                } else {
+                    &cwd
+                };
+                eprintln!("Delivering queued message for session {name}...");
+                match resume(&sid, &prompt, resume_cwd) {
+                    Ok(new_id) => {
+                        eprintln!("Queued message delivered: session {name} resumed ({new_id})");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to deliver queued message for session {name}: {e}");
                     }
                 }
             }

@@ -108,13 +108,14 @@ impl Db {
                 prompt TEXT NOT NULL,
                 cwd TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );"
+            );",
         )?;
         Ok(Db { conn })
     }
 
     // --- Sessions ---
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         &self,
         session_id: &str,
@@ -379,9 +380,9 @@ impl Db {
 
     /// Check if a queued message exists for a session name.
     pub fn has_queued_message(&self, session_name: &str) -> rusqlite::Result<bool> {
-        let mut stmt = self.conn.prepare(
-            "SELECT 1 FROM queued_messages WHERE session_name = ?1 LIMIT 1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM queued_messages WHERE session_name = ?1 LIMIT 1")?;
         let mut rows = stmt.query(params![session_name])?;
         Ok(rows.next()?.is_some())
     }
