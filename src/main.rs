@@ -55,7 +55,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("Resumed session: {new_session_id}");
         }
 
-        Commands::List { session } => {
+        Commands::List { session, status } => {
             let db = open_db()?;
             let mut sessions = db.get_sessions()?;
             if let Some(ref filter) = session {
@@ -66,7 +66,31 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         || s.session_id.starts_with(filter.as_str())
                 });
             }
-            if sessions.is_empty() {
+            // Resolve true status for each session, then apply status filter
+            let rows: Vec<_> = sessions
+                .iter()
+                .map(|s| {
+                    let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
+                    let resolved_status = if s.status == "running" && !alive {
+                        let resolved =
+                            session::resolve_dead_session(&db, &s.session_id);
+                        if resolved == "completed" {
+                            "completed"
+                        } else {
+                            "failed"
+                        }
+                    } else {
+                        &s.status
+                    };
+                    (s, resolved_status)
+                })
+                .filter(|(_s, resolved_status)| {
+                    status
+                        .as_ref()
+                        .map_or(true, |f| resolved_status.eq_ignore_ascii_case(f))
+                })
+                .collect();
+            if rows.is_empty() {
                 println!("No sessions.");
                 return Ok(());
             }
@@ -74,18 +98,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "{:<14} {:<10} {:<20} PROMPT",
                 "NAME/ID", "STATUS", "STARTED"
             );
-            for s in &sessions {
-                let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
-                let status = if s.status == "running" && !alive {
-                    let resolved = session::resolve_dead_session(&db, &s.session_id);
-                    if resolved == "completed" {
-                        "completed"
-                    } else {
-                        "failed"
-                    }
-                } else {
-                    &s.status
-                };
+            for (s, resolved_status) in &rows {
                 let id_display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
                 let prompt_short = if s.prompt.len() > 50 {
                     format!("{}...", &s.prompt[..47])
@@ -94,7 +107,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 println!(
                     "{:<14} {:<10} {:<20} {}",
-                    id_display, status, &s.started_at, prompt_short,
+                    id_display, resolved_status, &s.started_at, prompt_short,
                 );
             }
         }
