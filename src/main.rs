@@ -437,7 +437,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let mut cfg = config::load_file(&path);
                     cfg.policies.retain(|p| p.tool != tool);
-                    cfg.policies.push(config::Policy { tool: tool.clone(), action: action.clone() });
+                    cfg.policies.push(config::Policy { tool: tool.clone(), action: action.clone(), pattern: None });
                     cfg.save(&path)?;
                     let scope = if user { "user" } else { "project" };
                     println!("Added policy: {tool} -> {action} ({scope})");

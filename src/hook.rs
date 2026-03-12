@@ -71,7 +71,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let config = Config::load(&cwd);
 
-    if let Some(decision) = policy::check(&tool_name, &config.policies) {
+    if let Some(decision) = policy::check(&tool_name, &tool_input_str, &config.policies) {
         match decision.as_str() {
             "allow" => print_and_exit(HookOutput::allow()),
             "deny" => print_and_exit(HookOutput::deny(Some(format!("Denied by policy for tool: {tool_name}")))),

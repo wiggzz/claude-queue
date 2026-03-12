@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 pub struct Policy {
     pub tool: String,
     pub action: String, // "allow", "deny", "ask"
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>, // regex pattern to match against tool_input (e.g. Bash command)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,10 +129,10 @@ pub fn ensure_user_config() {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
             policies: vec![
-                Policy { tool: "Read".into(), action: "allow".into() },
-                Policy { tool: "Glob".into(), action: "allow".into() },
-                Policy { tool: "Grep".into(), action: "allow".into() },
-                Policy { tool: "LSP".into(), action: "allow".into() },
+                Policy { tool: "Read".into(), action: "allow".into(), pattern: None },
+                Policy { tool: "Glob".into(), action: "allow".into(), pattern: None },
+                Policy { tool: "Grep".into(), action: "allow".into(), pattern: None },
+                Policy { tool: "LSP".into(), action: "allow".into(), pattern: None },
             ],
         };
         let _ = config.save(&path);
