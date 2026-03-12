@@ -224,7 +224,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                     let pending = db.get_pending_tool_calls(session_id_prefix.as_deref())?;
-                    let mut count = 0usize;
+                    let mut approved_calls: Vec<&db::ToolCall> = Vec::new();
                     for tc in &pending {
                         // Filter by tool type if specified
                         if let Some(ref tool_name) = tool
@@ -257,13 +257,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 &format!("Batch approve matching /{pattern}/"),
                                 "human",
                             );
-                            count += 1;
+                            approved_calls.push(tc);
                         }
                     }
-                    println!("Approved {count} pending tool call(s) matching /{pattern}/.");
+                    if !approved_calls.is_empty() {
+                        let names = db.get_session_names().unwrap_or_default();
+                        print_approved_details(&approved_calls, &names);
+                    }
+                    println!(
+                        "Approved {} pending tool call(s) matching /{pattern}/.",
+                        approved_calls.len()
+                    );
                 } else {
                     // Original behavior without --match
                     // Fetch pending calls before approving so we can audit-log each one
+                    let names = db.get_session_names().unwrap_or_default();
                     match (session, tool) {
                         (Some(session_filter), Some(tool_name)) => {
                             let sess = db
@@ -275,7 +283,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 &sess.session_id,
                                 &tool_name,
                             )?;
-                            for tc in pending.iter().filter(|tc| tc.tool_name == tool_name) {
+                            let matched: Vec<_> = pending
+                                .iter()
+                                .filter(|tc| tc.tool_name == tool_name)
+                                .collect();
+                            for tc in &matched {
                                 audit::log(
                                     &tc.session_id,
                                     &tc.tool_name,
@@ -285,6 +297,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                     "human",
                                 );
                             }
+                            print_approved_details(&matched, &names);
                             println!(
                                 "Approved {count} pending {tool_name} call(s) for session {display}."
                             );
@@ -306,6 +319,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                     "human",
                                 );
                             }
+                            print_approved_details(&pending, &names);
                             println!(
                                 "Approved {count} pending tool call(s) for session {display}."
                             );
@@ -313,7 +327,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         (None, Some(tool_name)) => {
                             let pending = db.get_pending_tool_calls(None)?;
                             let count = db.approve_all_pending_for_tool(&tool_name)?;
-                            for tc in pending.iter().filter(|tc| tc.tool_name == tool_name) {
+                            let matched: Vec<_> = pending
+                                .iter()
+                                .filter(|tc| tc.tool_name == tool_name)
+                                .collect();
+                            for tc in &matched {
                                 audit::log(
                                     &tc.session_id,
                                     &tc.tool_name,
@@ -323,10 +341,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                     "human",
                                 );
                             }
+                            print_approved_details(&matched, &names);
                             println!("Approved {count} pending {tool_name} call(s).");
                         }
                         (None, None) => {
                             let pending = db.get_pending_tool_calls(None)?;
+                            if !pending.is_empty() {
+                                eprintln!(
+                                    "Warning: approving all pending calls across all sessions. \
+                                     Consider using --session to scope approvals."
+                                );
+                            }
                             let count = db.approve_all_pending()?;
                             for tc in &pending {
                                 audit::log(
@@ -338,6 +363,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                     "human",
                                 );
                             }
+                            print_approved_details(&pending, &names);
                             println!("Approved {count} pending tool call(s).");
                         }
                     }
@@ -743,9 +769,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         println!("No policies configured.");
                         return Ok(());
                     }
-                    println!("{:<20} {:<10}", "TOOL", "ACTION");
+                    println!("{:<20} {:<10} PATTERN", "TOOL", "ACTION");
                     for p in &config.policies {
-                        println!("{:<20} {:<10}", p.tool, p.action);
+                        let pattern_display = match (&p.pattern, &p.match_mode) {
+                            (Some(pat), crate::config::MatchMode::Domain) => {
+                                format!("domain:{pat}")
+                            }
+                            (Some(pat), _) => pat.clone(),
+                            (None, _) => "-".to_string(),
+                        };
+                        println!("{:<20} {:<10} {}", p.tool, p.action, pattern_display);
                     }
                 }
                 PolicyCommands::Add {
@@ -768,6 +801,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         tool: tool.clone(),
                         action: action.clone(),
                         pattern: pattern.clone(),
+                        match_mode: config::MatchMode::default(),
                     });
                     cfg.save(&path)?;
                     let scope = if user { "user" } else { "project" };
@@ -868,6 +902,29 @@ fn print_pending_table(calls: &[db::ToolCall]) {
 
 fn truncate_str(s: &str, max: usize) -> &str {
     if s.len() <= max { s } else { &s[..max] }
+}
+
+/// Print details of each approved tool call to stderr so orchestrators surface what was approved.
+fn print_approved_details(
+    calls: &[impl std::borrow::Borrow<db::ToolCall>],
+    session_names: &std::collections::HashMap<String, String>,
+) {
+    for item in calls {
+        let tc = item.borrow();
+        let session_display = session_names
+            .get(&tc.session_id)
+            .map(|s| s.as_str())
+            .unwrap_or(&tc.session_id[..8.min(tc.session_id.len())]);
+        let description = if let Some(ref summary) = tc.summary {
+            format!("\"{}\"", truncate_str(summary, 70))
+        } else {
+            format::format_tool_input(&tc.tool_name, &tc.tool_input, 72)
+        };
+        eprintln!(
+            "  ✓ [{}] {} — {}",
+            session_display, tc.tool_name, description
+        );
+    }
 }
 
 fn tool_call_to_json(tc: &db::ToolCall) -> String {
