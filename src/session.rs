@@ -4,6 +4,52 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// Result of attempting to start a session that may already be running.
+pub enum StartResult {
+    /// A new session was started (session_id).
+    Started(String),
+    /// The message was queued for delivery when the running session completes.
+    Queued,
+    /// The message replaced a previously queued message.
+    Replaced,
+}
+
+/// Start a session, or queue the message if a same-named session is still running.
+/// Returns StartResult indicating what happened.
+pub fn queue_or_start(
+    prompt: &str,
+    name: &str,
+    cwd: &str,
+) -> Result<StartResult, Box<dyn std::error::Error>> {
+    let db = Db::open(&config::db_path())?;
+    let cwd_abs = fs::canonicalize(cwd)?;
+
+    // Check if there's a running session with this name
+    if let Some(sess) = db.find_session(name)? {
+        let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
+        if sess.status == "running" && alive {
+            // Session is running — queue the message
+            let had_existing = db.has_queued_message(name)?;
+            db.upsert_queued_message(name, prompt, &cwd_abs.to_string_lossy())?;
+            return Ok(if had_existing {
+                StartResult::Replaced
+            } else {
+                StartResult::Queued
+            });
+        }
+    }
+
+    // No running session — start a new one
+    let session_id = start(prompt, Some(name), cwd)?;
+    Ok(StartResult::Started(session_id))
+}
+
+/// Cancel a queued message for a named session.
+pub fn cancel_queued(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    let db = Db::open(&config::db_path())?;
+    Ok(db.cancel_queued_message(name)?)
+}
+
 /// Start a brand new sub-agent session.
 pub fn start(
     prompt: &str,
@@ -141,9 +187,11 @@ fn launch(
         pid,
     )?;
 
-    // Spawn a thread to wait for completion and update DB
+    // Spawn a thread to wait for completion and update DB, then deliver queued messages
     let sid = session_id.to_string();
     let dbp = db_path.clone();
+    let session_name = name.map(|s| s.to_string());
+    let cwd_for_thread = cwd_abs.to_string_lossy().to_string();
     std::thread::spawn(move || {
         let mut child = child;
         let status = child.wait();
@@ -160,6 +208,31 @@ fn launch(
                 }
                 Err(_) => {
                     let _ = db.update_session_status(&sid, "failed", None);
+                }
+            }
+
+            // Check for queued message and deliver it as a resume
+            if let Some(ref name) = session_name {
+                if let Ok(Some((prompt, cwd))) = db.take_queued_message(name) {
+                    // Use the queued cwd, falling back to the original session's cwd
+                    let resume_cwd = if cwd.is_empty() {
+                        &cwd_for_thread
+                    } else {
+                        &cwd
+                    };
+                    eprintln!("Delivering queued message for session {name}...");
+                    match resume(&sid, &prompt, resume_cwd) {
+                        Ok(new_id) => {
+                            eprintln!(
+                                "Queued message delivered: session {name} resumed ({new_id})"
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Failed to deliver queued message for session {name}: {e}"
+                            );
+                        }
+                    }
                 }
             }
         }

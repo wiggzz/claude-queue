@@ -100,6 +100,16 @@ impl Db {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
         let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
+        // Queue table for resume queuing
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS queued_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT UNIQUE NOT NULL,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );"
+        )?;
         Ok(Db { conn })
     }
 
@@ -310,6 +320,70 @@ impl Db {
             params![session_id, tool_name],
         )?;
         Ok(changed)
+    }
+
+    // --- Queued Messages ---
+
+    /// Upsert a queued message for a session name (replaces any existing queued message).
+    pub fn upsert_queued_message(
+        &self,
+        session_name: &str,
+        prompt: &str,
+        cwd: &str,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO queued_messages (session_name, prompt, cwd)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(session_name) DO UPDATE SET prompt = ?2, cwd = ?3, created_at = datetime('now')",
+            params![session_name, prompt, cwd],
+        )?;
+        Ok(())
+    }
+
+    /// Take (get and delete) a queued message for a session name, if one exists.
+    pub fn take_queued_message(
+        &self,
+        session_name: &str,
+    ) -> rusqlite::Result<Option<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT prompt, cwd FROM queued_messages WHERE session_name = ?1",
+        )?;
+        let result = stmt
+            .query_map(params![session_name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                ))
+            })?
+            .next();
+        match result {
+            Some(Ok(row)) => {
+                self.conn.execute(
+                    "DELETE FROM queued_messages WHERE session_name = ?1",
+                    params![session_name],
+                )?;
+                Ok(Some(row))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// Cancel (delete) a queued message for a session name. Returns true if one was deleted.
+    pub fn cancel_queued_message(&self, session_name: &str) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "DELETE FROM queued_messages WHERE session_name = ?1",
+            params![session_name],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Check if a queued message exists for a session name.
+    pub fn has_queued_message(&self, session_name: &str) -> rusqlite::Result<bool> {
+        let mut stmt = self.conn.prepare(
+            "SELECT 1 FROM queued_messages WHERE session_name = ?1 LIMIT 1",
+        )?;
+        let mut rows = stmt.query(params![session_name])?;
+        Ok(rows.next()?.is_some())
     }
 
     fn map_tool_call(row: &rusqlite::Row) -> rusqlite::Result<ToolCall> {
@@ -596,5 +670,51 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].summary.as_deref(), Some("Does something"));
         assert!(pending[1].summary.is_none());
+    }
+
+    #[test]
+    fn test_upsert_queued_message() {
+        let db = open_temp_db();
+        db.upsert_queued_message("mytask", "do thing 1", "/tmp")
+            .unwrap();
+        assert!(db.has_queued_message("mytask").unwrap());
+
+        // Second upsert replaces the first
+        db.upsert_queued_message("mytask", "do thing 2", "/home")
+            .unwrap();
+        let (prompt, cwd) = db.take_queued_message("mytask").unwrap().unwrap();
+        assert_eq!(prompt, "do thing 2");
+        assert_eq!(cwd, "/home");
+
+        // take_queued_message deletes it
+        assert!(!db.has_queued_message("mytask").unwrap());
+        assert!(db.take_queued_message("mytask").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_cancel_queued_message() {
+        let db = open_temp_db();
+        db.upsert_queued_message("mytask", "do thing", "/tmp")
+            .unwrap();
+        assert!(db.cancel_queued_message("mytask").unwrap());
+        assert!(!db.has_queued_message("mytask").unwrap());
+        // Cancel non-existent returns false
+        assert!(!db.cancel_queued_message("mytask").unwrap());
+    }
+
+    #[test]
+    fn test_queued_message_independent_per_name() {
+        let db = open_temp_db();
+        db.upsert_queued_message("task-a", "prompt a", "/a")
+            .unwrap();
+        db.upsert_queued_message("task-b", "prompt b", "/b")
+            .unwrap();
+        assert!(db.has_queued_message("task-a").unwrap());
+        assert!(db.has_queued_message("task-b").unwrap());
+        assert!(!db.has_queued_message("task-c").unwrap());
+
+        db.cancel_queued_message("task-a").unwrap();
+        assert!(!db.has_queued_message("task-a").unwrap());
+        assert!(db.has_queued_message("task-b").unwrap());
     }
 }

@@ -48,15 +48,23 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Start a new sub-agent: cq start "your prompt here" [--name my-task] [--cwd DIR]
+    ///
+    /// If --name is given and that session is still running, the message is queued
+    /// and will be delivered as a resume when the session completes. A second queued
+    /// message replaces the first (at most one pending follow-up per session).
+    /// Use --cancel to remove a queued-but-not-yet-delivered message.
     Start {
-        /// The prompt to send to the sub-agent
-        prompt: String,
+        /// The prompt to send to the sub-agent (optional with --cancel)
+        prompt: Option<String>,
         /// Friendly name for this session (used with resume, result, etc.)
         #[arg(long, short)]
         name: Option<String>,
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Cancel a queued-but-not-yet-delivered message for the named session
+        #[arg(long, requires = "name")]
+        cancel: bool,
     },
     /// List all sessions with their status (running, completed, failed)
     List {

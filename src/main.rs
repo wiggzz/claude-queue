@@ -40,10 +40,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run()?;
         }
 
-        Commands::Start { prompt, name, cwd } => {
-            let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
-            let display = name.as_deref().unwrap_or(&session_id[..8]);
-            println!("Started session: {display} ({session_id})");
+        Commands::Start {
+            prompt,
+            name,
+            cwd,
+            cancel,
+        } => {
+            if cancel {
+                let name = name.as_deref().expect("--cancel requires --name");
+                if session::cancel_queued(name)? {
+                    println!("Cancelled queued message for session {name}.");
+                } else {
+                    println!("No queued message for session {name}.");
+                }
+            } else {
+                let prompt = prompt.ok_or("prompt is required (unless using --cancel)")?;
+                if let Some(ref name) = name {
+                    match session::queue_or_start(&prompt, name, &cwd)? {
+                        session::StartResult::Started(session_id) => {
+                            println!("Started session: {name} ({session_id})");
+                        }
+                        session::StartResult::Queued => {
+                            println!("Queued message for running session: {name}");
+                        }
+                        session::StartResult::Replaced => {
+                            println!("Replaced queued message for running session: {name}");
+                        }
+                    }
+                } else {
+                    let session_id = session::start(&prompt, None, &cwd)?;
+                    println!("Started session: {} ({session_id})", &session_id[..8]);
+                }
+            }
         }
 
         Commands::Resume {
