@@ -115,6 +115,11 @@ pub enum Commands {
         #[arg(long, default_value = ".")]
         cwd: String,
     },
+    /// Block until a session completes: cq wait <name-or-id>
+    Wait {
+        /// Session name or ID (prefix match)
+        session_id: String,
+    },
     /// Kill a running sub-agent session
     Kill {
         /// Session ID (prefix match)

@@ -356,6 +356,57 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::Wait { session_id } => {
+            let db = open_db()?;
+            let sess = db.find_session(&session_id)?
+                .ok_or_else(|| format!("No session matching '{session_id}'"))?;
+            let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+
+            // Check if already done
+            let mut status = sess.status.clone();
+            if status == "running" {
+                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
+                    status = session::resolve_dead_session(&db, &sess.session_id);
+                }
+            }
+
+            if status != "running" {
+                // Already finished — print result and exit
+                print_session_result(&sess.session_id, &status)?;
+                if status != "completed" {
+                    std::process::exit(1);
+                }
+                return Ok(());
+            }
+
+            // Poll until done
+            eprintln!("Waiting for session {display}...");
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+
+                // Re-fetch session to check status
+                let current = db.find_session(&sess.session_id)?
+                    .ok_or("Session disappeared from database")?;
+
+                let mut current_status = current.status.clone();
+                if current_status == "running" {
+                    let alive = current.pid.map(session::is_pid_alive).unwrap_or(false);
+                    if !alive {
+                        current_status = session::resolve_dead_session(&db, &current.session_id);
+                    }
+                }
+
+                if current_status != "running" {
+                    print_session_result(&sess.session_id, &current_status)?;
+                    if current_status != "completed" {
+                        std::process::exit(1);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         Commands::Kill { session_id } => {
             let db = open_db()?;
             let sess = db.find_session(&session_id)?
@@ -525,6 +576,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn print_session_result(session_id: &str, status: &str) -> Result<(), Box<dyn std::error::Error>> {
+    eprintln!("Session {} {status}.", &session_id[..8.min(session_id.len())]);
+    let content = session::get_output(session_id)?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        let stderr = session::get_stderr(session_id).unwrap_or_default();
+        if !stderr.trim().is_empty() {
+            eprintln!("{}", stderr.trim());
+        }
+    } else {
+        println!("{trimmed}");
     }
     Ok(())
 }
