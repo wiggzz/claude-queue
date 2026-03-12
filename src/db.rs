@@ -36,6 +36,7 @@ pub struct ToolCall {
 }
 
 const SESSION_COLS: &str = "id, session_id, agent_backend, agent_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -66,49 +67,7 @@ impl Db {
             PRAGMA busy_timeout=5000;
         ",
         )?;
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT UNIQUE NOT NULL,
-                agent_backend TEXT NOT NULL DEFAULT 'claude',
-                agent_session_id TEXT,
-                name TEXT,
-                prompt TEXT NOT NULL,
-                cwd TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'running',
-                pid INTEGER,
-                started_at TEXT NOT NULL DEFAULT (datetime('now')),
-                completed_at TEXT,
-                exit_code INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS tool_calls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                tool_name TEXT NOT NULL,
-                tool_input TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                reason TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                resolved_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_tool_calls_pending
-                ON tool_calls(status) WHERE status = 'pending';
-            CREATE INDEX IF NOT EXISTS idx_tool_calls_session
-                ON tool_calls(session_id);
-            CREATE INDEX IF NOT EXISTS idx_sessions_status
-                ON sessions(status);
-        ",
-        )?;
-        // Migrations for existing DBs
-        let _ = conn.execute(
-            "ALTER TABLE sessions ADD COLUMN agent_backend TEXT NOT NULL DEFAULT 'claude'",
-            [],
-        );
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
-        let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
-        Self::migrate_sessions_schema(&conn)?;
+        Self::migrate(&conn)?;
         Ok(Db { conn })
     }
 
@@ -199,7 +158,108 @@ impl Db {
         Ok(map)
     }
 
-    fn migrate_sessions_schema(conn: &Connection) -> rusqlite::Result<()> {
+    fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+        let mut version = Self::schema_version(conn)?;
+        if version == 0 {
+            version = Self::infer_legacy_version(conn)?;
+            if version > 0 {
+                Self::set_schema_version(conn, version)?;
+            }
+        }
+
+        while version < CURRENT_SCHEMA_VERSION {
+            let next = version + 1;
+            Self::apply_migration(conn, next)?;
+            Self::set_schema_version(conn, next)?;
+            version = next;
+        }
+
+        Ok(())
+    }
+
+    fn infer_legacy_version(conn: &Connection) -> rusqlite::Result<i32> {
+        let has_sessions = Self::table_exists(conn, "sessions")?;
+        let has_tool_calls = Self::table_exists(conn, "tool_calls")?;
+        if !has_sessions && !has_tool_calls {
+            return Ok(0);
+        }
+
+        if Self::column_exists(conn, "sessions", "agent_backend")?
+            && Self::column_exists(conn, "sessions", "agent_session_id")?
+            && Self::column_exists(conn, "sessions", "name")?
+            && Self::column_exists(conn, "tool_calls", "summary")?
+            && !Self::column_exists(conn, "sessions", "claude_session_id")?
+        {
+            return Ok(3);
+        }
+
+        if Self::column_exists(conn, "sessions", "claude_session_id")?
+            || Self::column_exists(conn, "sessions", "name")?
+            || Self::column_exists(conn, "tool_calls", "summary")?
+        {
+            return Ok(2);
+        }
+
+        Ok(1)
+    }
+
+    fn apply_migration(conn: &Connection, version: i32) -> rusqlite::Result<()> {
+        match version {
+            1 => Self::migration_1_initial_schema(conn),
+            2 => Self::migration_2_session_metadata(conn),
+            3 => Self::migration_3_agent_backend_sessions(conn),
+            _ => Ok(()),
+        }
+    }
+
+    fn migration_1_initial_schema(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                pid INTEGER,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                exit_code INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_input TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_calls_pending
+                ON tool_calls(status) WHERE status = 'pending';
+            CREATE INDEX IF NOT EXISTS idx_tool_calls_session
+                ON tool_calls(session_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_status
+                ON sessions(status);
+        ",
+        )
+    }
+
+    fn migration_2_session_metadata(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
+        let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
+        Ok(())
+    }
+
+    fn migration_3_agent_backend_sessions(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN agent_backend TEXT NOT NULL DEFAULT 'claude'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT", []);
+
         if Self::column_exists(conn, "sessions", "claude_session_id")? {
             conn.execute_batch(
                 "
@@ -268,6 +328,21 @@ impl Db {
         )?;
 
         Ok(())
+    }
+
+    fn schema_version(conn: &Connection) -> rusqlite::Result<i32> {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+    }
+
+    fn set_schema_version(conn: &Connection, version: i32) -> rusqlite::Result<()> {
+        conn.execute_batch(&format!("PRAGMA user_version = {version}"))
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+        let mut stmt =
+            conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![table])?;
+        Ok(rows.next()?.is_some())
     }
 
     fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
@@ -441,6 +516,17 @@ mod tests {
     }
 
     #[test]
+    fn test_fresh_db_applies_all_migrations() {
+        let db = open_temp_db();
+        assert_eq!(
+            Db::schema_version(&db.conn).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert!(Db::table_exists(&db.conn, "sessions").unwrap());
+        assert!(Db::table_exists(&db.conn, "tool_calls").unwrap());
+    }
+
+    #[test]
     fn test_create_and_get_sessions() {
         let db = open_temp_db();
         db.create_session(
@@ -603,7 +689,66 @@ mod tests {
         assert_eq!(found.session_id, "cq-1");
         assert_eq!(found.agent_backend, AgentBackend::Claude);
         assert_eq!(found.agent_session_id.as_deref(), Some("claude-123"));
+        assert_eq!(
+            Db::schema_version(&db.conn).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
         assert!(!Db::column_exists(&db.conn, "sessions", "claude_session_id").unwrap());
+    }
+
+    #[test]
+    fn test_unversioned_current_schema_is_adopted_without_changes() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                agent_backend TEXT NOT NULL DEFAULT 'claude',
+                agent_session_id TEXT,
+                name TEXT,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                pid INTEGER,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                exit_code INTEGER
+            );
+            CREATE TABLE tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_input TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                summary TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at TEXT
+            );
+            CREATE INDEX idx_sessions_status ON sessions(status);
+            CREATE INDEX idx_tool_calls_session ON tool_calls(session_id);
+            CREATE INDEX idx_tool_calls_pending ON tool_calls(status) WHERE status = 'pending';
+        ",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, agent_backend, agent_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params!["cq-2", "codex", "thread-123", "beta", "p2", "/tmp", 2_i64],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(tmp.path()).unwrap();
+        assert_eq!(
+            Db::schema_version(&db.conn).unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        let found = db.find_session("thread-123").unwrap().unwrap();
+        assert_eq!(found.session_id, "cq-2");
+        assert_eq!(found.agent_backend, AgentBackend::Codex);
+        assert_eq!(found.agent_session_id.as_deref(), Some("thread-123"));
     }
 
     #[test]
