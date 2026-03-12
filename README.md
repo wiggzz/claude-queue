@@ -28,9 +28,11 @@ cq start "add user tests" --name tests --cwd ~/myproject
 cq pending
 
 # Approve or deny tool calls
-cq approve all
-cq approve all --tool Bash
+cq approve all --session auth         # scoped to one session (recommended)
+cq approve "Edit src/main.rs"         # approve by summary text match
+cq approve all --tool Bash            # approve all Bash calls
 cq approve all --match "cargo (build|test)"
+cq approve 5                          # approve by ID
 cq deny 5 --reason "don't touch that file"
 
 # Check status and results
@@ -101,7 +103,7 @@ When orchestrating from a parent Claude Code session, **never block the main loo
 ```
 # GOOD: check and approve in one shot, then move on
 cq pending
-cq approve all --tool Bash
+cq approve all --session myagent
 
 # GOOD: use audit --follow in a background task to monitor
 cq audit --follow
@@ -111,6 +113,24 @@ cq audit --follow
 ```
 
 `cq pending --wait` is designed for **background tasks and scripts only** — it blocks until a pending call appears, which defeats the purpose of an orchestrator or supervisor session that needs to do other work. Use it in a background process or external script, never as the main loop of an interactive session.
+
+### Transparent approvals
+
+A human watching the orchestrator should always see **what** is being approved. `cq approve all` prints each approved call's details to stderr:
+
+```
+  ✓ [auth] Bash — $ cargo test
+  ✓ [auth] Edit — [src/lib.rs] pub fn authenticate...
+Approved 2 pending tool call(s) for session auth.
+```
+
+**Recommended approval patterns for orchestrators** (most to least specific):
+
+1. **By summary text** — `cq approve "Edit src/main.rs"` matches the supervisor's summary. Best for targeted approvals where the orchestrator knows exactly what to expect.
+2. **By regex** — `cq approve all --match "cargo (build|test)"` approves calls matching a pattern.
+3. **By session + tool** — `cq approve all --session auth --tool Bash` scoped to one session and tool type.
+4. **By session** — `cq approve all --session auth` approves everything for one agent.
+5. **Global** — `cq approve all` approves everything (prints a warning recommending `--session`).
 
 ### Parallel agents with worktrees
 
