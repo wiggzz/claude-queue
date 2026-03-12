@@ -29,7 +29,7 @@ struct LlmResponse {
     reason: String,
 }
 
-fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) -> String {
+pub(crate) fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) -> String {
     let mut prompt = String::from(SYSTEM_PROMPT);
 
     // Add user-defined rules
@@ -129,7 +129,8 @@ pub fn evaluate(
 /// Extract the text content from claude CLI JSON output.
 /// The claude CLI --output-format json returns a structure with a "result" field
 /// containing the assistant's text response.
-fn extract_text_from_claude_output(output: &str) -> String {
+pub(crate) fn extract_text_from_claude_output(output: &str) -> String {
+    // Try to parse as claude CLI JSON output format
     // Try to parse as claude CLI JSON output format
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
         // Claude CLI format: {"result": "...text..."}
@@ -152,7 +153,7 @@ fn extract_text_from_claude_output(output: &str) -> String {
 }
 
 /// Strip markdown code fencing (```json ... ```) from LLM responses.
-fn strip_markdown_fencing(text: &str) -> String {
+pub(crate) fn strip_markdown_fencing(text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.starts_with("```") {
         // Remove opening fence (```json or ```)
@@ -171,5 +172,78 @@ fn strip_markdown_fencing(text: &str) -> String {
         content.trim().to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_prompt_includes_system() {
+        let prompt = build_prompt(&[], "Bash", "ls");
+        assert!(
+            prompt.contains("security-conscious supervisor"),
+            "prompt should contain SYSTEM_PROMPT text"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_with_rules() {
+        let rules = vec!["Never allow rm -rf".to_string()];
+        let prompt = build_prompt(&rules, "Bash", "ls");
+        assert!(
+            prompt.contains("Additional rules"),
+            "prompt should contain Additional rules section"
+        );
+        assert!(
+            prompt.contains("Never allow rm -rf"),
+            "prompt should contain the rule text"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_tool_details() {
+        let prompt = build_prompt(&[], "Write", "/tmp/foo.txt");
+        assert!(prompt.contains("Tool: Write"), "prompt should contain tool name");
+        assert!(
+            prompt.contains("Input: /tmp/foo.txt"),
+            "prompt should contain tool input"
+        );
+    }
+
+    #[test]
+    fn test_strip_markdown_no_fencing() {
+        assert_eq!(strip_markdown_fencing("plain text"), "plain text");
+    }
+
+    #[test]
+    fn test_strip_markdown_json_fencing() {
+        let input = "```json\n{\"key\": \"value\"}\n```";
+        assert_eq!(strip_markdown_fencing(input), "{\"key\": \"value\"}");
+    }
+
+    #[test]
+    fn test_strip_markdown_generic_fencing() {
+        let input = "```\nhello world\n```";
+        assert_eq!(strip_markdown_fencing(input), "hello world");
+    }
+
+    #[test]
+    fn test_extract_text_result_string() {
+        let input = r#"{"result": "text"}"#;
+        assert_eq!(extract_text_from_claude_output(input), "text");
+    }
+
+    #[test]
+    fn test_extract_text_result_array() {
+        let input = r#"{"result": [{"type":"text","text":"hello"}]}"#;
+        assert_eq!(extract_text_from_claude_output(input), "hello");
+    }
+
+    #[test]
+    fn test_extract_text_raw_fallback() {
+        let input = "not json at all";
+        assert_eq!(extract_text_from_claude_output(input), "not json at all");
     }
 }
