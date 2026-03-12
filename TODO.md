@@ -22,11 +22,6 @@ Possible approaches:
 - Unified feed: interleave events from all agents with session labels, color-coded
 - Could feed into the TUI as a split pane (approvals on one side, activity on the other)
 
-## PR checks: require CI to pass before merge
-**Priority:** Medium — repo hygiene
-
-Enable branch protection on `main` requiring CI checks to pass before PRs can merge. Also consider adding e2e tests to the CI pipeline once they exist (see "End-to-end tests" item).
-
 ## Multi-agent backend support
 **Priority:** Medium — extensibility
 
@@ -57,6 +52,31 @@ When running in a git worktree, `.cq/config.json` isn't present because it's unt
 - Having `cq start` resolve the project root at launch time and pass it via `CQ_PROJECT_DIR` env var (faster, single resolution)
 
 This would eliminate the need to manually copy `.cq/config.json` into each worktree.
+
+## Supervisor: omit agent prompt from context by default
+**Priority:** High — security
+
+During this session, the supervisor approved `git push` despite its rules saying DENY, because the agent's prompt context ("Step 4: Push to main") convinced it to override its own rules. Fix: don't pass the session prompt/task to the supervisor by default. The supervisor should evaluate tool calls purely on their own merit against the rules. This can be an opt-in feature (`include_session_context: true` in config) for users who want the supervisor to allow things explicitly asked for by the agent's task.
+
+## Audit log: show tool call details inline
+**Priority:** Medium — observability
+
+`cq audit` shows tool name and decision but doesn't show the actual command by default. The audit-bash-display improvement was made but the output still truncates. Consider showing the full command/file path for all entries by default, or at least a `--verbose` flag. The audit log is the primary debugging tool — it should be maximally informative.
+
+## README: prerequisites and contributing
+**Priority:** Medium — public release
+
+README is missing:
+- Prerequisites section (Rust/Cargo, Claude Code CLI, minimum version requirements)
+- Note about Rust 2024 edition requiring recent toolchain
+- Contributing guide (even a brief one)
+- Link to Claude Code itself for context
+- Better explanation of `cq watch` dashboard
+
+## Reduce unwrap() calls at I/O boundaries
+**Priority:** Low — robustness
+
+67 `unwrap()` calls across 5 files. For a CLI tool this is generally acceptable, but converting panics at I/O boundaries to proper error messages (via `anyhow` or `miette`) would improve UX when things go wrong (bad permissions, missing files, etc.).
 
 ## Session expiration
 **Priority:** Medium — hygiene
@@ -102,3 +122,11 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Session status notification (`cq wait`)~~
 - ~~Approve with regex filter (`--match`)~~
 - ~~Supervisor audit log~~
+- ~~PR checks: branch protection requiring CI~~
+- ~~Hook output format fix (permissionDecisionReason)~~
+- ~~Supervisor escalate-only (no deny)~~
+- ~~Supervisor enabled by default with sensible system prompt~~
+- ~~Approve by summary text~~
+- ~~Self-update command (cq update)~~
+- ~~Audit log: show session names instead of IDs~~
+- ~~Audit log: show bash command contents~~
