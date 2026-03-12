@@ -89,6 +89,109 @@ fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
     (y, m, d)
 }
 
+/// Follow the audit log in real-time, printing new entries as they appear.
+/// Prints the last `tail` entries first, then polls for new lines every 500ms.
+pub fn follow(tail: usize, json: bool) {
+    use std::io::{Seek, SeekFrom};
+
+    let path = config::log_dir().join("audit.log");
+
+    // Print initial tail entries
+    let entries = read_tail(tail);
+    if !entries.is_empty() {
+        if !json {
+            println!(
+                "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+                "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON"
+            );
+        }
+        for entry in &entries {
+            print_entry(entry, json);
+        }
+    }
+
+    // Open file and seek to end
+    let mut file = match fs::File::open(&path) {
+        Ok(f) => f,
+        Err(_) => {
+            // File doesn't exist yet — wait for it
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Ok(f) = fs::File::open(&path) {
+                    if !json && entries.is_empty() {
+                        println!(
+                            "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+                            "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON"
+                        );
+                    }
+                    break f;
+                }
+            }
+        }
+    };
+    file.seek(SeekFrom::End(0)).unwrap_or_default();
+
+    let mut header_printed = !entries.is_empty();
+    let mut partial_line = String::new();
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let mut buf = Vec::new();
+        use std::io::Read;
+        if file.read_to_end(&mut buf).unwrap_or(0) == 0 {
+            continue;
+        }
+
+        let text = String::from_utf8_lossy(&buf);
+        partial_line.push_str(&text);
+
+        while let Some(newline_pos) = partial_line.find('\n') {
+            let line: String = partial_line.drain(..=newline_pos).collect();
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<AuditEntry>(line) {
+                if !json && !header_printed {
+                    println!(
+                        "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+                        "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON"
+                    );
+                    header_printed = true;
+                }
+                print_entry(&entry, json);
+            }
+        }
+    }
+}
+
+pub fn print_entry(entry: &AuditEntry, json: bool) {
+    if json {
+        println!("{}", serde_json::to_string(entry).unwrap());
+    } else {
+        let session_short = if entry.session_id.len() > 8 {
+            &entry.session_id[..8]
+        } else {
+            &entry.session_id
+        };
+        let reason_short = if entry.reason.len() > 40 {
+            format!("{}...", &entry.reason[..37])
+        } else {
+            entry.reason.clone()
+        };
+        println!(
+            "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+            &entry.timestamp,
+            entry.decision,
+            entry.actor,
+            entry.tool_name,
+            session_short,
+            reason_short,
+        );
+    }
+}
+
 /// Read the last N entries from the audit log.
 pub fn read_tail(n: usize) -> Vec<AuditEntry> {
     let path = config::log_dir().join("audit.log");

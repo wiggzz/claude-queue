@@ -599,40 +599,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Audit { tail, json } => {
-            let entries = audit::read_tail(tail);
-            if entries.is_empty() {
-                if !json {
-                    println!("No audit log entries.");
-                }
-                return Ok(());
-            }
-            if json {
-                for entry in &entries {
-                    println!("{}", serde_json::to_string(entry).unwrap());
-                }
+        Commands::Audit { tail, json, follow } => {
+            if follow {
+                audit::follow(tail, json);
             } else {
-                println!("{:<22} {:<10} {:<10} {:<15} {:<10} {}",
-                    "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON");
-                for entry in &entries {
-                    let session_short = if entry.session_id.len() > 8 {
-                        &entry.session_id[..8]
-                    } else {
-                        &entry.session_id
-                    };
-                    let reason_short = if entry.reason.len() > 40 {
-                        format!("{}...", &entry.reason[..37])
-                    } else {
-                        entry.reason.clone()
-                    };
+                let entries = audit::read_tail(tail);
+                if entries.is_empty() {
+                    if !json {
+                        println!("No audit log entries.");
+                    }
+                    return Ok(());
+                }
+                if json {
+                    for entry in &entries {
+                        println!("{}", serde_json::to_string(entry).unwrap());
+                    }
+                } else {
                     println!("{:<22} {:<10} {:<10} {:<15} {:<10} {}",
-                        &entry.timestamp,
-                        entry.decision,
-                        entry.actor,
-                        entry.tool_name,
-                        session_short,
-                        reason_short,
-                    );
+                        "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON");
+                    for entry in &entries {
+                        audit::print_entry(entry, false);
+                    }
                 }
             }
         }

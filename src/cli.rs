@@ -148,6 +148,9 @@ pub enum Commands {
         /// Output as raw JSON Lines
         #[arg(long)]
         json: bool,
+        /// Follow the audit log in real-time (like tail -f)
+        #[arg(long, short)]
+        follow: bool,
     },
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
