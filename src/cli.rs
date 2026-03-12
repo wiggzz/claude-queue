@@ -61,6 +61,9 @@ pub enum Commands {
         /// Block until a new pending tool call appears, print it, then exit
         #[arg(long, short)]
         wait: bool,
+        /// Output pending calls as JSON Lines (one JSON object per line)
+        #[arg(long)]
+        json: bool,
         /// Show full (untruncated) tool input for all pending calls
         #[arg(long)]
         full: bool,

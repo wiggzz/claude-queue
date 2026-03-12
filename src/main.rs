@@ -79,7 +79,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Pending { session, wait, full, command } => {
+        Commands::Pending { session, wait, full, json, command } => {
             let db = open_db()?;
 
             match command {
@@ -108,7 +108,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     // (same behavior as without --wait)
                     let existing = db.get_pending_tool_calls(session.as_deref())?;
                     if !existing.is_empty() {
-                        if full {
+                        if json {
+                            for tc in &existing {
+                                println!("{}", tool_call_to_json(tc));
+                            }
+                        } else if full {
                             for (i, tc) in existing.iter().enumerate() {
                                 if i > 0 {
                                     println!("{}", "-".repeat(60));
@@ -152,17 +156,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .filter(|tc| !known_ids.contains(&tc.id))
                             .collect();
                         if !new_calls.is_empty() {
-                            println!("{:<6} {:<10} {:<15} {:<20} {}",
-                                "ID", "SESSION", "TOOL", "SINCE", "INPUT");
-                            for tc in &new_calls {
-                                let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
+                            if json {
+                                for tc in &new_calls {
+                                    println!("{}", tool_call_to_json(tc));
+                                }
+                            } else {
                                 println!("{:<6} {:<10} {:<15} {:<20} {}",
-                                    tc.id,
-                                    &tc.session_id[..8.min(tc.session_id.len())],
-                                    tc.tool_name,
-                                    &tc.created_at,
-                                    input_short,
-                                );
+                                    "ID", "SESSION", "TOOL", "SINCE", "INPUT");
+                                for tc in &new_calls {
+                                    let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
+                                    println!("{:<6} {:<10} {:<15} {:<20} {}",
+                                        tc.id,
+                                        &tc.session_id[..8.min(tc.session_id.len())],
+                                        tc.tool_name,
+                                        &tc.created_at,
+                                        input_short,
+                                    );
+                                }
                             }
                             return Ok(());
                         }
@@ -176,10 +186,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 None => {
                     let pending = db.get_pending_tool_calls(session.as_deref())?;
                     if pending.is_empty() {
-                        println!("No pending approvals.");
+                        if !json {
+                            println!("No pending approvals.");
+                        }
                         return Ok(());
                     }
-                    if full {
+                    if json {
+                        for tc in &pending {
+                            println!("{}", tool_call_to_json(tc));
+                        }
+                    } else if full {
                         for (i, tc) in pending.iter().enumerate() {
                             if i > 0 {
                                 println!("{}", "-".repeat(60));
@@ -515,5 +531,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 fn open_db() -> Result<db::Db, Box<dyn std::error::Error>> {
     Ok(db::Db::open(&config::db_path())?)
+}
+
+fn tool_call_to_json(tc: &db::ToolCall) -> String {
+    let tool_input = serde_json::from_str::<serde_json::Value>(&tc.tool_input)
+        .unwrap_or_else(|_| serde_json::Value::String(tc.tool_input.clone()));
+    let obj = serde_json::json!({
+        "id": tc.id,
+        "session_id": tc.session_id,
+        "tool_name": tc.tool_name,
+        "tool_input": tool_input,
+        "created_at": tc.created_at,
+    });
+    serde_json::to_string(&obj).unwrap()
 }
 
