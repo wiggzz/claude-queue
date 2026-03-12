@@ -10,16 +10,16 @@ Default guidelines:
 - If a tool call's purpose doesn't clearly relate to the agent's task, ESCALATE.
 - If you can't determine what files or systems would be affected, ESCALATE.
 - Piped commands with many stages deserve extra scrutiny.
-- Base64-encoded content, eval, or indirect execution should be DENIED unless clearly benign.
+- Base64-encoded content, eval, or indirect execution should be ESCALATED.
 - Read-only operations (reading files, searching, listing) are generally safe to APPROVE.
 - Writing or editing files within the project directory is generally safe to APPROVE.
-- Network requests, package installs, and system modifications deserve scrutiny.
+- Network requests, package installs, and system modifications should be ESCALATED.
+- You can only APPROVE or ESCALATE. You cannot deny — only a human operator can deny.
 ";
 
 #[derive(Debug)]
 pub enum Decision {
     Approve(String),
-    Deny(String),
     Escalate {
         reason: String,
         summary: Option<String>,
@@ -68,10 +68,11 @@ pub(crate) fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) 
     ));
 
     prompt.push_str(
-        "\nRespond with JSON only: {\"decision\": \"approve|deny|escalate\", \"reason\": \"brief explanation\"}\n\
+        "\nRespond with JSON only: {\"decision\": \"approve|escalate\", \"reason\": \"brief explanation\"}\n\
         If you choose \"escalate\", also include a \"summary\" field: a single plain-English sentence \
         describing what the tool call does from a neutral perspective (e.g. \"Pushes current branch to origin/main\"). \
-        This summary will be shown to the human operator for approval."
+        This summary will be shown to the human operator for approval.\n\
+        You cannot deny — only approve or escalate. The human operator makes all deny decisions."
     );
 
     prompt
@@ -143,7 +144,8 @@ pub fn evaluate(
 
     match parsed.decision.to_lowercase().as_str() {
         "approve" => Ok(Decision::Approve(parsed.reason)),
-        "deny" => Ok(Decision::Deny(parsed.reason)),
+        // Supervisor cannot deny — only approve or escalate to human.
+        // This ensures the orchestrator always has visibility into blocked calls.
         _ => Ok(Decision::Escalate {
             reason: parsed.reason,
             summary: parsed.summary,

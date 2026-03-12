@@ -5,11 +5,6 @@
 
 Currently the supervisor calls `claude -p`. To support other models/providers, abstract the LLM call behind a trait or config option (e.g. `provider: "anthropic"` vs `provider: "openai"`). Could also support a direct API mode using curl/HTTP client for lower latency.
 
-## Supervisor: audit log
-**Priority:** Medium — observability
-
-Log every supervisor decision (approve/deny/escalate) and human decision to a file or DB table. Include timestamp, session, tool name, tool input, decision, reason, and who decided (supervisor vs human). Essential for debugging and trust-building.
-
 ## Config: resolve project root from worktrees
 **Priority:** High — UX
 
@@ -23,6 +18,20 @@ This would eliminate the need to manually copy `.cq/config.json` into each workt
 **Priority:** Medium — hygiene
 
 Auto-expire sessions that have been running longer than the configured timeout (default 24h). Mark them as "expired" in the DB. Could run as part of `cq list` or as a separate `cq gc` command.
+
+## End-to-end tests for hook and supervisor
+**Priority:** Medium — correctness
+
+Add integration tests that exercise the full hook → policy → supervisor → pending → approve/deny flow. Key cases:
+- Policy allow: tool call auto-approved, never hits supervisor
+- Policy deny: tool call blocked immediately
+- Supervisor escalate: tool call lands in pending, can be approved/denied by orchestrator
+- Supervisor approve: tool call auto-approved
+- Hook output format: verify Claude Code actually honors deny (regression test for the `permissionDecisionReason` fix)
+- Approve by summary: `cq approve "summary text"` matches and approves the right call
+- Timeout: pending call times out and returns deny to the agent
+
+These would ideally run in CI using a mock or lightweight supervisor (no real LLM calls).
 
 ## DB cleanup
 **Priority:** Medium — hygiene
@@ -48,3 +57,4 @@ Auto-expire sessions that have been running longer than the configured timeout (
 - ~~Pending --wait: emit JSON mode~~
 - ~~Session status notification (`cq wait`)~~
 - ~~Approve with regex filter (`--match`)~~
+- ~~Supervisor audit log~~

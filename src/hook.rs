@@ -22,33 +22,37 @@ struct HookInput {
 struct HookOutput {
     #[serde(rename = "hookSpecificOutput")]
     hook_specific_output: HookDecision,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "systemMessage")]
-    system_message: Option<String>,
 }
 
 #[derive(Serialize)]
 struct HookDecision {
+    #[serde(rename = "hookEventName")]
+    hook_event_name: String,
     #[serde(rename = "permissionDecision")]
     permission_decision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "permissionDecisionReason")]
+    permission_decision_reason: Option<String>,
 }
 
 impl HookOutput {
     fn allow() -> Self {
         HookOutput {
             hook_specific_output: HookDecision {
+                hook_event_name: "PreToolUse".into(),
                 permission_decision: "allow".into(),
+                permission_decision_reason: None,
             },
-            system_message: None,
         }
     }
 
     fn deny(reason: Option<String>) -> Self {
         HookOutput {
             hook_specific_output: HookDecision {
+                hook_event_name: "PreToolUse".into(),
                 permission_decision: "deny".into(),
+                permission_decision_reason: reason,
             },
-            system_message: reason,
         }
     }
 }
@@ -120,20 +124,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "supervisor",
                 );
                 print_and_exit(HookOutput::allow());
-            }
-            Ok(supervisor::Decision::Deny(reason)) => {
-                eprintln!("[cq supervisor] denied: {reason}");
-                audit::log(
-                    &session_id,
-                    &tool_name,
-                    &tool_input_str,
-                    "deny",
-                    &reason,
-                    "supervisor",
-                );
-                print_and_exit(HookOutput::deny(Some(format!(
-                    "Supervisor denied: {reason}"
-                ))));
             }
             Ok(supervisor::Decision::Escalate { reason, summary }) => {
                 eprintln!("[cq supervisor] escalated: {reason}");
