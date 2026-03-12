@@ -173,6 +173,8 @@ pub enum Commands {
     },
     /// Update cq to the latest release from GitHub
     Update,
+    /// Print the current version
+    Version,
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
