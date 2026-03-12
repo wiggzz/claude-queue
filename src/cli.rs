@@ -181,6 +181,11 @@ pub enum Commands {
     Update,
     /// Print the current version
     Version,
+    /// Show or manage configuration
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommands,
+    },
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
@@ -240,4 +245,10 @@ pub enum PolicyCommands {
         #[arg(long)]
         user: bool,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommands {
+    /// Show the effective merged configuration (user + project + defaults)
+    Show,
 }
