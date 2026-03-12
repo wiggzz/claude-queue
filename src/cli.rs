@@ -126,9 +126,9 @@ pub enum Commands {
     },
     /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
     ///
-    /// Takes a session name, cq ID prefix, or raw Claude session ID.
+    /// Takes a session name, cq ID prefix, or raw backend session ID.
     Resume {
-        /// Session name, cq ID prefix, or full Claude session ID
+        /// Session name, cq ID prefix, or full backend session ID
         session_id: String,
         /// Follow-up prompt to send (default: "continue")
         #[arg(default_value = "continue")]
