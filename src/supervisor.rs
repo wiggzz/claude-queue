@@ -31,7 +31,12 @@ struct LlmResponse {
     summary: Option<String>,
 }
 
-pub(crate) fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) -> String {
+pub(crate) fn build_prompt(
+    rules: &[String],
+    tool_name: &str,
+    tool_input: &str,
+    include_session_context: bool,
+) -> String {
     let mut prompt = String::from(SYSTEM_PROMPT);
 
     // Add user-defined rules
@@ -42,21 +47,25 @@ pub(crate) fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) 
         }
     }
 
-    // Add session context from env vars
-    let session_name = std::env::var("CQ_SESSION_NAME").unwrap_or_default();
-    let session_prompt = std::env::var("CQ_SESSION_PROMPT").unwrap_or_default();
-    let session_cwd = std::env::var("CQ_SESSION_CWD").unwrap_or_default();
+    // Only include session context when explicitly opted in.
+    // By default, the supervisor evaluates tool calls purely on their own merit
+    // to prevent the agent's prompt from biasing approval decisions.
+    if include_session_context {
+        let session_name = std::env::var("CQ_SESSION_NAME").unwrap_or_default();
+        let session_prompt = std::env::var("CQ_SESSION_PROMPT").unwrap_or_default();
+        let session_cwd = std::env::var("CQ_SESSION_CWD").unwrap_or_default();
 
-    if !session_name.is_empty() || !session_prompt.is_empty() || !session_cwd.is_empty() {
-        prompt.push_str("\nSession context:\n");
-        if !session_name.is_empty() {
-            prompt.push_str(&format!("- Session name: {session_name}\n"));
-        }
-        if !session_prompt.is_empty() {
-            prompt.push_str(&format!("- Session task: {session_prompt}\n"));
-        }
-        if !session_cwd.is_empty() {
-            prompt.push_str(&format!("- Working directory: {session_cwd}\n"));
+        if !session_name.is_empty() || !session_prompt.is_empty() || !session_cwd.is_empty() {
+            prompt.push_str("\nSession context:\n");
+            if !session_name.is_empty() {
+                prompt.push_str(&format!("- Session name: {session_name}\n"));
+            }
+            if !session_prompt.is_empty() {
+                prompt.push_str(&format!("- Session task: {session_prompt}\n"));
+            }
+            if !session_cwd.is_empty() {
+                prompt.push_str(&format!("- Working directory: {session_cwd}\n"));
+            }
         }
     }
 
@@ -81,7 +90,12 @@ pub fn evaluate(
     tool_name: &str,
     tool_input: &str,
 ) -> Result<Decision, Box<dyn std::error::Error>> {
-    let prompt = build_prompt(&config.rules, tool_name, tool_input);
+    let prompt = build_prompt(
+        &config.rules,
+        tool_name,
+        tool_input,
+        config.include_session_context,
+    );
 
     let output = Command::new("claude")
         .args([
@@ -206,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt_includes_system() {
-        let prompt = build_prompt(&[], "Bash", "ls");
+        let prompt = build_prompt(&[], "Bash", "ls", false);
         assert!(
             prompt.contains("security-conscious supervisor"),
             "prompt should contain SYSTEM_PROMPT text"
@@ -216,7 +230,7 @@ mod tests {
     #[test]
     fn test_build_prompt_with_rules() {
         let rules = vec!["Never allow rm -rf".to_string()];
-        let prompt = build_prompt(&rules, "Bash", "ls");
+        let prompt = build_prompt(&rules, "Bash", "ls", false);
         assert!(
             prompt.contains("Additional rules"),
             "prompt should contain Additional rules section"
@@ -229,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_build_prompt_tool_details() {
-        let prompt = build_prompt(&[], "Write", "/tmp/foo.txt");
+        let prompt = build_prompt(&[], "Write", "/tmp/foo.txt", false);
         assert!(
             prompt.contains("Tool: Write"),
             "prompt should contain tool name"
@@ -238,6 +252,33 @@ mod tests {
             prompt.contains("Input: /tmp/foo.txt"),
             "prompt should contain tool input"
         );
+    }
+
+    #[test]
+    fn test_build_prompt_omits_session_context_by_default() {
+        // When include_session_context is false, even if env vars are set,
+        // the prompt should not read them. We verify by checking the code path:
+        // with false, the env var block is skipped entirely.
+        let prompt = build_prompt(&[], "Bash", "git push", false);
+        assert!(
+            !prompt.contains("Session context"),
+            "prompt should NOT contain session context when include_session_context is false"
+        );
+        assert!(
+            !prompt.contains("Session task"),
+            "prompt should NOT contain session task label"
+        );
+    }
+
+    #[test]
+    fn test_build_prompt_session_context_flag_controls_inclusion() {
+        // With include_session_context=true but no env vars set,
+        // the session context section should still be absent (no data to show)
+        let prompt = build_prompt(&[], "Bash", "git push", true);
+        // If env vars aren't set, there's nothing to include — that's fine.
+        // The key invariant is that with false, the section is never present.
+        // We already tested that above. Here we just verify no crash with true.
+        assert!(prompt.contains("Tool: Bash"));
     }
 
     #[test]
