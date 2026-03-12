@@ -102,12 +102,23 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Approve { id } => {
+        Commands::Approve { id, session } => {
             let db = open_db()?;
             if id == "all" {
-                let count = db.approve_all_pending()?;
-                println!("Approved {count} pending tool call(s).");
+                if let Some(session_filter) = session {
+                    let sess = db.find_session(&session_filter)?
+                        .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
+                    let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                    let count = db.approve_all_pending_for_session(&sess.session_id)?;
+                    println!("Approved {count} pending tool call(s) for session {display}.");
+                } else {
+                    let count = db.approve_all_pending()?;
+                    println!("Approved {count} pending tool call(s).");
+                }
             } else {
+                if session.is_some() {
+                    return Err("--session can only be used with 'cq approve all'".into());
+                }
                 let id: i64 = id.parse().map_err(|_| "Invalid ID. Use a number or 'all'.")?;
                 if db.resolve_tool_call(id, "approved", None)? {
                     println!("Approved tool call {id}.");

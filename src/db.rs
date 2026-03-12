@@ -203,6 +203,14 @@ impl Db {
         Ok(changed)
     }
 
+    pub fn approve_all_pending_for_session(&self, session_id: &str) -> rusqlite::Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE tool_calls SET status = 'approved', resolved_at = datetime('now') WHERE status = 'pending' AND session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(changed)
+    }
+
     fn map_tool_call(row: &rusqlite::Row) -> rusqlite::Result<ToolCall> {
         Ok(ToolCall {
             id: row.get(0)?,

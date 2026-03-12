@@ -58,10 +58,13 @@ pub enum Commands {
         #[arg(long)]
         session: Option<String>,
     },
-    /// Approve a pending tool call: cq approve <id> or cq approve all
+    /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>]
     Approve {
         /// Tool call ID (number) or "all" to approve everything pending
         id: String,
+        /// Only approve tool calls for this session (name or ID prefix)
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Deny a pending tool call: cq deny <id> [--reason "..."]
     Deny {
