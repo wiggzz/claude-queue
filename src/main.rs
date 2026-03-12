@@ -125,14 +125,29 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let db = open_db()?;
             let sess = db.find_session(&session_id)?
                 .ok_or_else(|| format!("No session matching '{session_id}'"))?;
+
+            // Resolve status if the process died without updating DB
+            let status = if sess.status == "running" {
+                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
+                    session::resolve_dead_session(&db, &sess.session_id)
+                } else {
+                    sess.status.clone()
+                }
+            } else {
+                sess.status.clone()
+            };
+
             let content = session::get_output(&sess.session_id)?;
             let trimmed = content.trim();
             if trimmed.is_empty() {
                 let stderr = session::get_stderr(&sess.session_id).unwrap_or_default();
                 if !stderr.trim().is_empty() {
-                    eprintln!("{}", stderr.trim());
+                    eprintln!("Session {} ({}):\n{}", sess.session_id[..8].to_string(), status, stderr.trim());
+                } else if status == "running" {
+                    println!("(no output yet — session is still running)");
                 } else {
-                    println!("(no output yet)");
+                    println!("(no output — session {})", status);
                 }
             } else {
                 println!("{trimmed}");
@@ -143,6 +158,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let db = open_db()?;
             let sess = db.find_session(&session_id)?
                 .ok_or_else(|| format!("No session matching '{session_id}'"))?;
+
+            // Resolve status if the process died without updating DB
+            let status = if sess.status == "running" {
+                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
+                    session::resolve_dead_session(&db, &sess.session_id)
+                } else {
+                    sess.status.clone()
+                }
+            } else {
+                sess.status.clone()
+            };
 
             if follow {
                 let mut last_len = 0;
@@ -156,7 +183,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 let content = session::get_output(&sess.session_id)?;
-                print!("{content}");
+                if content.is_empty() {
+                    let stderr = session::get_stderr(&sess.session_id).unwrap_or_default();
+                    if !stderr.trim().is_empty() {
+                        eprintln!("Session {} ({}):\n{}", &sess.session_id[..8], status, stderr.trim());
+                    } else if status == "running" {
+                        println!("(no output yet — session is still running)");
+                    } else {
+                        println!("(no output — session {})", status);
+                    }
+                } else {
+                    print!("{content}");
+                }
             }
         }
 
