@@ -2,6 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// How to interpret the pattern field when matching tool input.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchMode {
+    /// Match the pattern as a regex against the extracted text (default).
+    #[default]
+    Regex,
+    /// Match the pattern as a domain against the URL's host (for WebFetch).
+    Domain,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Policy {
     pub tool: String,
@@ -9,6 +20,13 @@ pub struct Policy {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>, // regex pattern to match against tool_input (e.g. Bash command)
+    #[serde(default)]
+    #[serde(skip_serializing_if = "is_default_match_mode")]
+    pub match_mode: MatchMode,
+}
+
+fn is_default_match_mode(mode: &MatchMode) -> bool {
+    *mode == MatchMode::Regex
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +256,27 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
         let rest = &entry[paren_start + 1..];
         let pattern_str = rest.strip_suffix(')')?;
 
+        // Handle WebFetch(domain:X) — domain matching mode
+        if tool == "WebFetch" {
+            if let Some(domain) = pattern_str.strip_prefix("domain:") {
+                return Some(Policy {
+                    tool: tool.to_string(),
+                    action: action.to_string(),
+                    pattern: Some(domain.to_string()),
+                    match_mode: MatchMode::Domain,
+                });
+            }
+        }
+
+        // For path-based tools, strip leading // (Claude Code's absolute path convention)
+        let pattern_str = if matches!(tool, "Read" | "Edit" | "Write" | "Glob" | "Grep")
+            && pattern_str.starts_with("//")
+        {
+            &pattern_str[1..] // "//Users/..." → "/Users/..."
+        } else {
+            pattern_str
+        };
+
         // Convert Claude Code glob pattern to regex
         let regex_pattern = claude_code_pattern_to_regex(pattern_str);
 
@@ -245,6 +284,7 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
             tool: tool.to_string(),
             action: action.to_string(),
             pattern: Some(regex_pattern),
+            match_mode: MatchMode::Regex,
         })
     } else {
         // Bare tool name — allow/deny unconditionally
@@ -252,6 +292,7 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
             tool: entry.to_string(),
             action: action.to_string(),
             pattern: None,
+            match_mode: MatchMode::Regex,
         })
     }
 }
@@ -261,7 +302,7 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
 ///   - `*` / `**` for wildcard matching
 ///   - `:` before `*` as a prefix separator (e.g. `cq start:*` matches "cq start anything")
 fn claude_code_pattern_to_regex(pattern: &str) -> String {
-    let mut regex = String::from("(?s)"); // dot-matches-newline for ** patterns
+    let mut regex = String::from("(?s)^"); // anchored, dot-matches-newline for ** patterns
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
 
@@ -302,21 +343,25 @@ pub fn ensure_user_config() {
                     tool: "Read".into(),
                     action: "allow".into(),
                     pattern: None,
+                    match_mode: MatchMode::default(),
                 },
                 Policy {
                     tool: "Glob".into(),
                     action: "allow".into(),
                     pattern: None,
+                    match_mode: MatchMode::default(),
                 },
                 Policy {
                     tool: "Grep".into(),
                     action: "allow".into(),
                     pattern: None,
+                    match_mode: MatchMode::default(),
                 },
                 Policy {
                     tool: "LSP".into(),
                     action: "allow".into(),
                     pattern: None,
+                    match_mode: MatchMode::default(),
                 },
             ],
             supervisor: SupervisorConfig {
@@ -388,6 +433,7 @@ mod tests {
                 tool: "Write".into(),
                 action: "ask".into(),
                 pattern: Some("secret".into()),
+                match_mode: MatchMode::default(),
             }],
             supervisor: SupervisorConfig {
                 enabled: true,
@@ -446,13 +492,15 @@ mod tests {
 
     #[test]
     fn test_parse_claude_code_permission_path_pattern() {
+        // Double-slash prefix is Claude Code's absolute path convention — stripped to single /
         let p = parse_claude_code_permission("Read(//Users/wtj/src/**)", "allow").unwrap();
         assert_eq!(p.tool, "Read");
         assert_eq!(p.action, "allow");
         let pat = p.pattern.unwrap();
         let re = regex::Regex::new(&pat).unwrap();
-        assert!(re.is_match("//Users/wtj/src/foo/bar.rs"));
-        assert!(!re.is_match("//Users/other/file.rs"));
+        // Should match actual file_path values (single slash)
+        assert!(re.is_match("/Users/wtj/src/foo/bar.rs"));
+        assert!(!re.is_match("/Users/other/file.rs"));
     }
 
     #[test]
@@ -467,16 +515,33 @@ mod tests {
 
     #[test]
     fn test_claude_code_pattern_to_regex() {
-        // Simple wildcard
-        assert_eq!(claude_code_pattern_to_regex("foo*"), "(?s)foo.*");
+        // Simple wildcard (anchored with ^)
+        assert_eq!(claude_code_pattern_to_regex("foo*"), "(?s)^foo.*");
         // Double wildcard
-        assert_eq!(claude_code_pattern_to_regex("foo/**"), "(?s)foo/.*");
+        assert_eq!(claude_code_pattern_to_regex("foo/**"), "(?s)^foo/.*");
         // Special chars escaped
-        assert_eq!(claude_code_pattern_to_regex("a.b"), "(?s)a\\.b");
+        assert_eq!(claude_code_pattern_to_regex("a.b"), "(?s)^a\\.b");
         // Colon before wildcard is a prefix separator (dropped)
-        assert_eq!(claude_code_pattern_to_regex("cmd:*"), "(?s)cmd.*");
+        assert_eq!(claude_code_pattern_to_regex("cmd:*"), "(?s)^cmd.*");
         // Colon not before wildcard is literal
-        assert_eq!(claude_code_pattern_to_regex("a:b"), "(?s)a:b");
+        assert_eq!(claude_code_pattern_to_regex("a:b"), "(?s)^a:b");
+    }
+
+    #[test]
+    fn test_parse_claude_code_permission_webfetch_domain() {
+        let p = parse_claude_code_permission("WebFetch(domain:example.com)", "allow").unwrap();
+        assert_eq!(p.tool, "WebFetch");
+        assert_eq!(p.action, "allow");
+        assert_eq!(p.pattern, Some("example.com".into()));
+        assert_eq!(p.match_mode, MatchMode::Domain);
+    }
+
+    #[test]
+    fn test_parse_claude_code_permission_webfetch_url_pattern() {
+        // Non-domain WebFetch pattern is a regex
+        let p = parse_claude_code_permission("WebFetch(https://docs.rs:*)", "allow").unwrap();
+        assert_eq!(p.tool, "WebFetch");
+        assert_eq!(p.match_mode, MatchMode::Regex);
     }
 
     #[test]
