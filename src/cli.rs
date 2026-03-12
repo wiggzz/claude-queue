@@ -63,6 +63,9 @@ pub enum Commands {
         /// Filter by session name (contains match) or session ID (prefix match)
         #[arg(long)]
         session: Option<String>,
+        /// Filter by status (e.g. running, completed, failed, killed)
+        #[arg(long)]
+        status: Option<String>,
     },
     /// Show tool calls waiting for your approval
     #[command(args_conflicts_with_subcommands = true)]
