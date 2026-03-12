@@ -6,6 +6,7 @@ mod format;
 mod hook;
 mod policy;
 mod session;
+mod supervisor;
 mod watch;
 
 use clap::Parser;

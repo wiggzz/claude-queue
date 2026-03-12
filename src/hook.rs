@@ -1,6 +1,7 @@
 use crate::config::{self, Config};
 use crate::db::Db;
 use crate::policy;
+use crate::supervisor;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use std::path::PathBuf;
@@ -76,6 +77,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             "allow" => print_and_exit(HookOutput::allow()),
             "deny" => print_and_exit(HookOutput::deny(Some(format!("Denied by policy for tool: {tool_name}")))),
             _ => {}
+        }
+    }
+
+    // No static policy match — try supervisor if enabled
+    if config.supervisor.enabled {
+        match supervisor::evaluate(&config.supervisor, &tool_name, &tool_input_str) {
+            Ok(supervisor::Decision::Approve(reason)) => {
+                eprintln!("[cq supervisor] approved: {reason}");
+                print_and_exit(HookOutput::allow());
+            }
+            Ok(supervisor::Decision::Deny(reason)) => {
+                eprintln!("[cq supervisor] denied: {reason}");
+                print_and_exit(HookOutput::deny(Some(format!("Supervisor denied: {reason}"))));
+            }
+            Ok(supervisor::Decision::Escalate(reason)) => {
+                eprintln!("[cq supervisor] escalated: {reason}");
+                // Fall through to human approval
+            }
+            Err(e) => {
+                eprintln!("[cq supervisor] error, escalating: {e}");
+                // Fall through to human approval
+            }
         }
     }
 

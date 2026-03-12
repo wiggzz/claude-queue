@@ -11,6 +11,20 @@ pub struct Policy {
     pub pattern: Option<String>, // regex pattern to match against tool_input (e.g. Bash command)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SupervisorConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_supervisor_model")]
+    pub model: String,
+    #[serde(default)]
+    pub rules: Vec<String>,
+}
+
+fn default_supervisor_model() -> String {
+    "haiku".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default = "default_timeout")]
@@ -19,6 +33,8 @@ pub struct Config {
     pub poll_interval: f64,
     #[serde(default)]
     pub policies: Vec<Policy>,
+    #[serde(default)]
+    pub supervisor: SupervisorConfig,
 }
 
 impl Default for Config {
@@ -27,6 +43,7 @@ impl Default for Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
             policies: Vec::new(),
+            supervisor: SupervisorConfig::default(),
         }
     }
 }
@@ -62,10 +79,28 @@ impl Config {
         let mut policies = project_config.policies;
         policies.extend(user_config.policies);
 
+        // Supervisor: project config wins for enabled/model, rules are merged (project first)
+        let supervisor = SupervisorConfig {
+            enabled: project_config.supervisor.enabled || user_config.supervisor.enabled,
+            model: if !project_config.supervisor.model.is_empty()
+                && project_config.supervisor.model != default_supervisor_model()
+            {
+                project_config.supervisor.model
+            } else {
+                user_config.supervisor.model
+            },
+            rules: {
+                let mut rules = project_config.supervisor.rules;
+                rules.extend(user_config.supervisor.rules);
+                rules
+            },
+        };
+
         Config {
             timeout,
             poll_interval,
             policies,
+            supervisor,
         }
     }
 
@@ -134,6 +169,7 @@ pub fn ensure_user_config() {
                 Policy { tool: "Grep".into(), action: "allow".into(), pattern: None },
                 Policy { tool: "LSP".into(), action: "allow".into(), pattern: None },
             ],
+            supervisor: SupervisorConfig::default(),
         };
         let _ = config.save(&path);
     }
