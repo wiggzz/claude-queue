@@ -21,6 +21,10 @@ pub fn start(
 
 /// Resume a session. Accepts either a cq session ID prefix or a raw claude session ID.
 /// Looks up the claude_session_id from the DB if it's a cq prefix, otherwise uses it directly.
+///
+/// If the target session is still running (status == "running" and PID alive), this will
+/// wait for it to complete before launching the resume, preventing two Claude processes
+/// from fighting over the same session ID.
 pub fn resume(
     id_or_prefix: &str,
     prompt: &str,
@@ -29,12 +33,16 @@ pub fn resume(
     let db = Db::open(&config::db_path())?;
 
     // Try to find by cq session prefix first, then by claude session ID
-    let claude_sid = if let Some(sess) = db.find_session(id_or_prefix)? {
-        // Found a cq session — use its claude_session_id, falling back to session_id
-        sess.claude_session_id.unwrap_or(sess.session_id)
+    let (claude_sid, name) = if let Some(sess) = db.find_session(id_or_prefix)? {
+        // Check if the session is still running and wait if so
+        wait_for_session_if_running(&db, &sess)?;
+
+        let csid = sess.claude_session_id.unwrap_or_else(|| sess.session_id.clone());
+        let name = sess.name;
+        (csid, name)
     } else {
         // Not in our DB — treat as a raw claude session ID
-        id_or_prefix.to_string()
+        (id_or_prefix.to_string(), None)
     };
 
     let cq_session_id = uuid::Uuid::new_v4().to_string();
@@ -44,12 +52,6 @@ pub fn resume(
         claude_sid.clone(),
         prompt.to_string(),
     ];
-    // Inherit the name from the original session if it had one
-    let name = if let Some(sess) = db.find_session(id_or_prefix)? {
-        sess.name
-    } else {
-        None
-    };
 
     let display_prompt = format!(
         "[resumed {}] {}",
@@ -64,6 +66,55 @@ pub fn resume(
         cwd,
         args,
     )
+}
+
+/// If the session is still running (status == "running"), either wait for it to finish
+/// (if the PID is alive) or resolve the dead session status (if the PID is dead).
+fn wait_for_session_if_running(
+    db: &Db,
+    sess: &crate::db::Session,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if sess.status != "running" {
+        return Ok(());
+    }
+
+    let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
+
+    if !alive {
+        // PID is dead but status is still "running" — resolve the stale status
+        resolve_dead_session(db, &sess.session_id);
+        return Ok(());
+    }
+
+    // Session is genuinely still running — wait for it to complete
+    let display = sess
+        .name
+        .as_deref()
+        .unwrap_or(&sess.session_id[..8.min(sess.session_id.len())]);
+    let pid = sess.pid.unwrap();
+    eprintln!(
+        "Session '{display}' is still running (pid {pid}). Waiting for it to complete..."
+    );
+
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        // Check if the PID is still alive
+        if !is_pid_alive(pid) {
+            // PID died — resolve and break
+            resolve_dead_session(db, &sess.session_id);
+            eprintln!("Session '{display}' has finished. Resuming...");
+            return Ok(());
+        }
+
+        // Also check if the DB status has been updated (the background thread may have done it)
+        if let Some(current) = db.find_session(&sess.session_id)? {
+            if current.status != "running" {
+                eprintln!("Session '{display}' has finished. Resuming...");
+                return Ok(());
+            }
+        }
+    }
 }
 
 /// Common launch logic for both start and resume.
