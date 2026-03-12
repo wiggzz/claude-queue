@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.0](https://github.com/wiggzz/claude-queue/compare/v0.3.0...v0.4.0) (2026-03-12)
+
+
+### Features
+
+* add --status filter to cq list ([#18](https://github.com/wiggzz/claude-queue/issues/18)) ([b2fc9d3](https://github.com/wiggzz/claude-queue/commit/b2fc9d3021443b77ca0e315282062b2564a48dfa))
+* add cq config show to display effective configuration ([#11](https://github.com/wiggzz/claude-queue/issues/11)) ([f3e8f1b](https://github.com/wiggzz/claude-queue/commit/f3e8f1b2c43d83f878c982a18b7d8242c3b6e02a))
+
 ## [0.3.0](https://github.com/wiggzz/claude-queue/compare/v0.2.0...v0.3.0) (2026-03-12)
 
 
