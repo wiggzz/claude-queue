@@ -158,9 +158,8 @@ impl Db {
     /// Find ALL sessions matching a name, ordered by started_at ASC.
     /// Only matches by exact name. Returns empty vec if no matches.
     pub fn find_sessions_by_name(&self, name: &str) -> rusqlite::Result<Vec<Session>> {
-        let sql = format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 ORDER BY started_at ASC"
-        );
+        let sql =
+            format!("SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 ORDER BY started_at ASC");
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![name], map_session)?;
         rows.collect()
