@@ -838,14 +838,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     );
 
                     // Supervisor section
-                    let sv_enabled_source =
-                        if project_exists && project_cfg.supervisor.enabled {
-                            "project"
-                        } else if user_cfg.supervisor.enabled {
-                            "user"
-                        } else {
-                            "default"
-                        };
+                    let sv_enabled_source = if project_exists && project_cfg.supervisor.enabled {
+                        "project"
+                    } else if user_cfg.supervisor.enabled {
+                        "user"
+                    } else {
+                        "default"
+                    };
                     let sv_model_source = if project_exists
                         && !project_cfg.supervisor.model.is_empty()
                         && project_cfg.supervisor.model != defaults.supervisor.model
@@ -925,19 +924,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     // Config file paths
                     let user_path = config::user_config_path();
                     let home = std::env::var("HOME").unwrap_or_default();
-                    let user_display = user_path
-                        .to_string_lossy()
-                        .replace(&home, "~");
+                    let user_display = user_path.to_string_lossy().replace(&home, "~");
                     println!();
                     println!("Config files:");
                     println!("  User:    {user_display}");
                     if project_exists {
                         println!("  Project: {}", project_path.display());
                     } else {
-                        println!(
-                            "  Project: {} (not found)",
-                            project_path.display()
-                        );
+                        println!("  Project: {} (not found)", project_path.display());
                     }
                 }
             }
