@@ -1,3 +1,4 @@
+mod audit;
 mod cli;
 mod config;
 mod db;
@@ -272,33 +273,51 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if re.is_match(&match_text) {
                             db.resolve_tool_call(tc.id, "approved", None)?;
+                            audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "approve", &format!("Batch approve matching /{pattern}/"), "human");
                             count += 1;
                         }
                     }
                     println!("Approved {count} pending tool call(s) matching /{pattern}/.");
                 } else {
                     // Original behavior without --match
+                    // Fetch pending calls before approving so we can audit-log each one
                     match (session, tool) {
                         (Some(session_filter), Some(tool_name)) => {
                             let sess = db.find_session(&session_filter)?
                                 .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
                             let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                            let pending = db.get_pending_tool_calls(Some(&sess.session_id))?;
                             let count = db.approve_all_pending_for_session_and_tool(&sess.session_id, &tool_name)?;
+                            for tc in pending.iter().filter(|tc| tc.tool_name == tool_name) {
+                                audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "approve", "Batch approve all", "human");
+                            }
                             println!("Approved {count} pending {tool_name} call(s) for session {display}.");
                         }
                         (Some(session_filter), None) => {
                             let sess = db.find_session(&session_filter)?
                                 .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
                             let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                            let pending = db.get_pending_tool_calls(Some(&sess.session_id))?;
                             let count = db.approve_all_pending_for_session(&sess.session_id)?;
+                            for tc in &pending {
+                                audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "approve", "Batch approve all", "human");
+                            }
                             println!("Approved {count} pending tool call(s) for session {display}.");
                         }
                         (None, Some(tool_name)) => {
+                            let pending = db.get_pending_tool_calls(None)?;
                             let count = db.approve_all_pending_for_tool(&tool_name)?;
+                            for tc in pending.iter().filter(|tc| tc.tool_name == tool_name) {
+                                audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "approve", "Batch approve all", "human");
+                            }
                             println!("Approved {count} pending {tool_name} call(s).");
                         }
                         (None, None) => {
+                            let pending = db.get_pending_tool_calls(None)?;
                             let count = db.approve_all_pending()?;
+                            for tc in &pending {
+                                audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "approve", "Batch approve all", "human");
+                            }
                             println!("Approved {count} pending tool call(s).");
                         }
                     }
@@ -308,7 +327,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     return Err("--session, --tool, and --match can only be used with 'cq approve all'".into());
                 }
                 let id: i64 = id.parse().map_err(|_| "Invalid ID. Use a number or 'all'.")?;
+                let tc = db.get_tool_call_by_id(id)?;
                 if db.resolve_tool_call(id, "approved", None)? {
+                    if let Some(tc) = tc {
+                        audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "approve", "Manual approve", "human");
+                    }
                     println!("Approved tool call {id}.");
                 } else {
                     eprintln!("Tool call {id} not found or not pending.");
@@ -319,7 +342,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Commands::Deny { id, reason } => {
             let db = open_db()?;
             let reason_str = reason.as_deref().unwrap_or("Denied by operator");
+            let tc = db.get_tool_call_by_id(id)?;
             if db.resolve_tool_call(id, "denied", Some(reason_str))? {
+                if let Some(tc) = tc {
+                    audit::log(&tc.session_id, &tc.tool_name, &tc.tool_input, "deny", reason_str, "human");
+                }
                 println!("Denied tool call {id}.");
             } else {
                 eprintln!("Tool call {id} not found or not pending.");
@@ -568,6 +595,44 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
 
                     println!("Resume with: claude --resume {}", session.session_id);
+                }
+            }
+        }
+
+        Commands::Audit { tail, json } => {
+            let entries = audit::read_tail(tail);
+            if entries.is_empty() {
+                if !json {
+                    println!("No audit log entries.");
+                }
+                return Ok(());
+            }
+            if json {
+                for entry in &entries {
+                    println!("{}", serde_json::to_string(entry).unwrap());
+                }
+            } else {
+                println!("{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+                    "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON");
+                for entry in &entries {
+                    let session_short = if entry.session_id.len() > 8 {
+                        &entry.session_id[..8]
+                    } else {
+                        &entry.session_id
+                    };
+                    let reason_short = if entry.reason.len() > 40 {
+                        format!("{}...", &entry.reason[..37])
+                    } else {
+                        entry.reason.clone()
+                    };
+                    println!("{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+                        &entry.timestamp,
+                        entry.decision,
+                        entry.actor,
+                        entry.tool_name,
+                        session_short,
+                        reason_short,
+                    );
                 }
             }
         }

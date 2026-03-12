@@ -140,6 +140,15 @@ pub enum Commands {
         #[command(subcommand)]
         command: PolicyCommands,
     },
+    /// View the audit log of supervisor and human approval decisions
+    Audit {
+        /// Number of entries to show (default: 20)
+        #[arg(long, default_value = "20")]
+        tail: usize,
+        /// Output as raw JSON Lines
+        #[arg(long)]
+        json: bool,
+    },
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
