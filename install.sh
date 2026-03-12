@@ -43,6 +43,9 @@ curl -fsSL "$URL" -o "${TMPDIR}/${ARCHIVE}"
 tar xzf "${TMPDIR}/${ARCHIVE}" -C "$TMPDIR"
 
 echo "Installing to ${INSTALL_DIR}/cq..."
+if [ ! -d "$INSTALL_DIR" ]; then
+  mkdir -p "$INSTALL_DIR" 2>/dev/null || sudo mkdir -p "$INSTALL_DIR"
+fi
 if [ -w "$INSTALL_DIR" ]; then
   mv "${TMPDIR}/cq" "${INSTALL_DIR}/cq"
 else
