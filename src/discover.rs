@@ -176,7 +176,7 @@ fn parse_session_file(
 }
 
 /// Extract text content from a message's content field.
-fn extract_message_text(val: &Value) -> Option<String> {
+pub(crate) fn extract_message_text(val: &Value) -> Option<String> {
     let message = val.get("message")?;
     let content = message.get("content")?;
 
@@ -405,4 +405,102 @@ pub fn get_session_summary(path: &Path, max_messages: usize) -> Vec<String> {
     // Return last N messages
     let start = messages.len().saturating_sub(max_messages);
     messages[start..].to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_extract_message_text_string() {
+        let val: Value = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": "hello world"
+            }
+        });
+        assert_eq!(extract_message_text(&val), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_extract_message_text_array() {
+        let val: Value = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "text", "text": "world"}
+                ]
+            }
+        });
+        assert_eq!(extract_message_text(&val), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_extract_message_text_empty_array() {
+        let val: Value = serde_json::json!({
+            "type": "user",
+            "message": {
+                "content": []
+            }
+        });
+        assert_eq!(extract_message_text(&val), None);
+    }
+
+    #[test]
+    fn test_extract_message_text_no_message() {
+        let val: Value = serde_json::json!({
+            "type": "user",
+            "sessionId": "abc123"
+        });
+        assert_eq!(extract_message_text(&val), None);
+    }
+
+    #[test]
+    fn test_get_session_summary_empty_file() {
+        let file = NamedTempFile::new().unwrap();
+        let result = get_session_summary(file.path(), 10);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_get_session_summary_messages() {
+        let mut file = NamedTempFile::new().unwrap();
+        let lines = [
+            serde_json::json!({"type": "user", "message": {"content": "What is Rust?"}}),
+            serde_json::json!({"type": "assistant", "message": {"content": "A systems language."}}),
+            serde_json::json!({"type": "user", "message": {"content": "Tell me more."}}),
+        ];
+        for line in &lines {
+            writeln!(file, "{}", line).unwrap();
+        }
+        file.flush().unwrap();
+
+        let result = get_session_summary(file.path(), 10);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "[user] What is Rust?");
+        assert_eq!(result[1], "[assistant] A systems language.");
+        assert_eq!(result[2], "[user] Tell me more.");
+    }
+
+    #[test]
+    fn test_get_session_summary_max_messages() {
+        let mut file = NamedTempFile::new().unwrap();
+        for i in 0..10 {
+            let msg = serde_json::json!({
+                "type": "user",
+                "message": {"content": format!("message {i}")}
+            });
+            writeln!(file, "{}", msg).unwrap();
+        }
+        file.flush().unwrap();
+
+        let result = get_session_summary(file.path(), 3);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "[user] message 7");
+        assert_eq!(result[1], "[user] message 8");
+        assert_eq!(result[2], "[user] message 9");
+    }
 }
