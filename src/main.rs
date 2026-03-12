@@ -671,7 +671,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Gc { older_than, dry_run } => {
+        Commands::Gc {
+            older_than,
+            dry_run,
+        } => {
             let db = open_db()?;
 
             // 1. Resolve stale running sessions (process dead but DB says running)
@@ -701,27 +704,40 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .iter()
                     .filter(|s| s.status != "running" && s.started_at < cutoff)
                     .collect();
-                let old_ids: Vec<String> = old_sessions.iter().map(|s| s.session_id.clone()).collect();
+                let old_ids: Vec<String> =
+                    old_sessions.iter().map(|s| s.session_id.clone()).collect();
                 let tool_call_count = if old_ids.is_empty() {
                     0
                 } else {
                     // Count tool calls that would be deleted
-                    old_ids.iter().map(|id| {
-                        db.conn.query_row(
-                            "SELECT COUNT(*) FROM tool_calls WHERE session_id = ?1",
-                            params![id],
-                            |row| row.get::<_, usize>(0),
-                        ).unwrap_or(0)
-                    }).sum::<usize>()
+                    old_ids
+                        .iter()
+                        .map(|id| {
+                            db.conn
+                                .query_row(
+                                    "SELECT COUNT(*) FROM tool_calls WHERE session_id = ?1",
+                                    params![id],
+                                    |row| row.get::<_, usize>(0),
+                                )
+                                .unwrap_or(0)
+                        })
+                        .sum::<usize>()
                 };
                 // Count log files that would be deleted
                 let log_dir = config::log_dir();
-                let log_count: usize = old_ids.iter().map(|id| {
-                    let mut count = 0;
-                    if log_dir.join(format!("{id}.log")).exists() { count += 1; }
-                    if log_dir.join(format!("{id}.stderr")).exists() { count += 1; }
-                    count
-                }).sum();
+                let log_count: usize = old_ids
+                    .iter()
+                    .map(|id| {
+                        let mut count = 0;
+                        if log_dir.join(format!("{id}.log")).exists() {
+                            count += 1;
+                        }
+                        if log_dir.join(format!("{id}.stderr")).exists() {
+                            count += 1;
+                        }
+                        count
+                    })
+                    .sum();
 
                 for s in &old_sessions {
                     let display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
@@ -1218,7 +1234,11 @@ fn parse_duration_to_cutoff(s: &str) -> Result<String, Box<dyn std::error::Error
     let secs = match unit {
         "h" => num * 3600,
         "d" => num * 86400,
-        _ => return Err(format!("Unknown duration unit '{unit}'. Use 'h' (hours) or 'd' (days)").into()),
+        _ => {
+            return Err(
+                format!("Unknown duration unit '{unit}'. Use 'h' (hours) or 'd' (days)").into(),
+            );
+        }
     };
     // Use SQLite to compute the cutoff timestamp, keeping format consistent with the DB
     let db = open_db()?;

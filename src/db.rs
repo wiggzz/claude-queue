@@ -327,7 +327,7 @@ impl Db {
     pub fn delete_sessions_older_than(&self, cutoff: &str) -> rusqlite::Result<Vec<String>> {
         // First collect the session IDs that will be deleted
         let mut stmt = self.conn.prepare(
-            "SELECT session_id FROM sessions WHERE started_at < ?1 AND status != 'running'"
+            "SELECT session_id FROM sessions WHERE started_at < ?1 AND status != 'running'",
         )?;
         let ids: Vec<String> = stmt
             .query_map(params![cutoff], |row| row.get(0))?
@@ -343,7 +343,10 @@ impl Db {
     }
 
     /// Delete tool_calls belonging to the given session IDs. Returns count deleted.
-    pub fn delete_tool_calls_for_sessions(&self, session_ids: &[String]) -> rusqlite::Result<usize> {
+    pub fn delete_tool_calls_for_sessions(
+        &self,
+        session_ids: &[String],
+    ) -> rusqlite::Result<usize> {
         if session_ids.is_empty() {
             return Ok(0);
         }
@@ -637,10 +640,14 @@ mod tests {
     #[test]
     fn test_get_running_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p1", "/tmp", 1).unwrap();
-        db.create_session("s2", None, None, "p2", "/tmp", 2).unwrap();
-        db.update_session_status("s2", "completed", Some(0)).unwrap();
-        db.create_session("s3", None, None, "p3", "/tmp", 3).unwrap();
+        db.create_session("s1", None, None, "p1", "/tmp", 1)
+            .unwrap();
+        db.create_session("s2", None, None, "p2", "/tmp", 2)
+            .unwrap();
+        db.update_session_status("s2", "completed", Some(0))
+            .unwrap();
+        db.create_session("s3", None, None, "p3", "/tmp", 3)
+            .unwrap();
         let running = db.get_running_sessions().unwrap();
         assert_eq!(running.len(), 2);
         let ids: Vec<&str> = running.iter().map(|s| s.session_id.as_str()).collect();
@@ -669,7 +676,9 @@ mod tests {
             [],
         ).unwrap();
 
-        let deleted = db.delete_sessions_older_than("2025-01-01 00:00:00").unwrap();
+        let deleted = db
+            .delete_sessions_older_than("2025-01-01 00:00:00")
+            .unwrap();
         assert_eq!(deleted.len(), 2);
         assert!(deleted.contains(&"old1".to_string()));
         assert!(deleted.contains(&"old2".to_string()));
@@ -690,7 +699,9 @@ mod tests {
         db.insert_tool_call("s2", "Write", "c").unwrap();
         db.insert_tool_call("s3", "Bash", "d").unwrap();
 
-        let count = db.delete_tool_calls_for_sessions(&["s1".to_string(), "s3".to_string()]).unwrap();
+        let count = db
+            .delete_tool_calls_for_sessions(&["s1".to_string(), "s3".to_string()])
+            .unwrap();
         assert_eq!(count, 3);
 
         // Only s2's tool call should remain
