@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -9,6 +10,8 @@ pub struct Db {
 pub struct Session {
     pub _id: i64,
     pub session_id: String,
+    pub agent_backend: AgentBackend,
+    pub agent_session_id: Option<String>,
     pub claude_session_id: Option<String>,
     pub name: Option<String>,
     pub prompt: String,
@@ -33,21 +36,23 @@ pub struct ToolCall {
     pub resolved_at: Option<String>,
 }
 
-const SESSION_COLS: &str = "id, session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
+const SESSION_COLS: &str = "id, session_id, agent_backend, agent_session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
 
 fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
         _id: row.get(0)?,
         session_id: row.get(1)?,
-        claude_session_id: row.get(2)?,
-        name: row.get(3)?,
-        prompt: row.get(4)?,
-        _cwd: row.get(5)?,
-        status: row.get(6)?,
-        pid: row.get(7)?,
-        started_at: row.get(8)?,
-        _completed_at: row.get(9)?,
-        _exit_code: row.get(10)?,
+        agent_backend: AgentBackend::from_db(&row.get::<_, String>(2)?),
+        agent_session_id: row.get(3)?,
+        claude_session_id: row.get(4)?,
+        name: row.get(5)?,
+        prompt: row.get(6)?,
+        _cwd: row.get(7)?,
+        status: row.get(8)?,
+        pid: row.get(9)?,
+        started_at: row.get(10)?,
+        _completed_at: row.get(11)?,
+        _exit_code: row.get(12)?,
     })
 }
 
@@ -68,6 +73,8 @@ impl Db {
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT UNIQUE NOT NULL,
+                agent_backend TEXT NOT NULL DEFAULT 'claude',
+                agent_session_id TEXT,
                 claude_session_id TEXT,
                 name TEXT,
                 prompt TEXT NOT NULL,
@@ -97,9 +104,18 @@ impl Db {
         ",
         )?;
         // Migrations for existing DBs
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN agent_backend TEXT NOT NULL DEFAULT 'claude'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
         let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
+        let _ = conn.execute(
+            "UPDATE sessions SET agent_session_id = COALESCE(agent_session_id, claude_session_id) WHERE agent_session_id IS NULL",
+            [],
+        );
         Ok(Db { conn })
     }
 
@@ -108,15 +124,29 @@ impl Db {
     pub fn create_session(
         &self,
         session_id: &str,
-        claude_session_id: Option<&str>,
+        agent_backend: AgentBackend,
+        agent_session_id: Option<&str>,
         name: Option<&str>,
         prompt: &str,
         cwd: &str,
         pid: u32,
     ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, claude_session_id, name, prompt, cwd, pid as i64],
+            "INSERT INTO sessions (session_id, agent_backend, agent_session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                session_id,
+                agent_backend.as_str(),
+                agent_session_id,
+                if agent_backend == AgentBackend::Claude {
+                    agent_session_id
+                } else {
+                    None
+                },
+                name,
+                prompt,
+                cwd,
+                pid as i64
+            ],
         )?;
         Ok(())
     }
@@ -141,11 +171,11 @@ impl Db {
         rows.collect()
     }
 
-    /// Find a session by name, session_id prefix, or claude_session_id prefix.
+    /// Find a session by name, session_id prefix, or agent session ID prefix.
     /// Name is an exact match; IDs are prefix matches. Most recent match wins.
     pub fn find_session(&self, query: &str) -> rusqlite::Result<Option<Session>> {
         let sql = format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 OR session_id LIKE ?1 || '%' OR claude_session_id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1"
+            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 OR session_id LIKE ?1 || '%' OR agent_session_id LIKE ?1 || '%' OR claude_session_id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![query], map_session)?;
@@ -340,8 +370,16 @@ mod tests {
     #[test]
     fn test_create_and_get_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "do stuff", "/tmp", 1234)
-            .unwrap();
+        db.create_session(
+            "s1",
+            AgentBackend::Claude,
+            None,
+            None,
+            "do stuff",
+            "/tmp",
+            1234,
+        )
+        .unwrap();
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "s1");
@@ -353,10 +391,26 @@ mod tests {
     #[test]
     fn test_find_session_by_name() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", 1)
-            .unwrap();
-        db.create_session("s2", None, Some("beta"), "p2", "/tmp", 2)
-            .unwrap();
+        db.create_session(
+            "s1",
+            AgentBackend::Claude,
+            None,
+            Some("alpha"),
+            "p1",
+            "/tmp",
+            1,
+        )
+        .unwrap();
+        db.create_session(
+            "s2",
+            AgentBackend::Claude,
+            None,
+            Some("beta"),
+            "p2",
+            "/tmp",
+            2,
+        )
+        .unwrap();
         let found = db.find_session("alpha").unwrap().unwrap();
         assert_eq!(found.session_id, "s1");
         let found = db.find_session("beta").unwrap().unwrap();
@@ -367,12 +421,36 @@ mod tests {
     #[test]
     fn test_find_sessions_by_name_returns_all() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
-            .unwrap();
-        db.create_session("s2", None, Some("other"), "p2", "/tmp", 2)
-            .unwrap();
-        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", 3)
-            .unwrap();
+        db.create_session(
+            "s1",
+            AgentBackend::Claude,
+            None,
+            Some("mytask"),
+            "p1",
+            "/tmp",
+            1,
+        )
+        .unwrap();
+        db.create_session(
+            "s2",
+            AgentBackend::Claude,
+            None,
+            Some("other"),
+            "p2",
+            "/tmp",
+            2,
+        )
+        .unwrap();
+        db.create_session(
+            "s3",
+            AgentBackend::Claude,
+            None,
+            Some("mytask"),
+            "p3",
+            "/tmp",
+            3,
+        )
+        .unwrap();
 
         let sessions = db.find_sessions_by_name("mytask").unwrap();
         assert_eq!(sessions.len(), 2);
@@ -390,8 +468,16 @@ mod tests {
     #[test]
     fn test_find_session_by_id_prefix() {
         let db = open_temp_db();
-        db.create_session("abc-123-def", None, None, "p", "/tmp", 1)
-            .unwrap();
+        db.create_session(
+            "abc-123-def",
+            AgentBackend::Claude,
+            None,
+            None,
+            "p",
+            "/tmp",
+            1,
+        )
+        .unwrap();
         let found = db.find_session("abc").unwrap().unwrap();
         assert_eq!(found.session_id, "abc-123-def");
         assert!(db.find_session("xyz").unwrap().is_none());
@@ -400,7 +486,8 @@ mod tests {
     #[test]
     fn test_update_session_status() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p", "/tmp", 1).unwrap();
+        db.create_session("s1", AgentBackend::Claude, None, None, "p", "/tmp", 1)
+            .unwrap();
         db.update_session_status("s1", "completed", Some(0))
             .unwrap();
         let sessions = db.get_sessions().unwrap();

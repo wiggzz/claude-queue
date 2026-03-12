@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -66,6 +67,8 @@ pub struct Config {
     #[serde(default = "default_poll_interval")]
     pub poll_interval: f64,
     #[serde(default)]
+    pub default_agent: AgentBackend,
+    #[serde(default)]
     pub policies: Vec<Policy>,
     #[serde(default)]
     pub supervisor: SupervisorConfig,
@@ -76,6 +79,7 @@ impl Default for Config {
         Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
+            default_agent: AgentBackend::default(),
             policies: Vec::new(),
             supervisor: SupervisorConfig::default(),
         }
@@ -142,6 +146,11 @@ impl Config {
         Config {
             timeout,
             poll_interval,
+            default_agent: if project_config.default_agent != AgentBackend::default() {
+                project_config.default_agent
+            } else {
+                user_config.default_agent
+            },
             policies,
             supervisor,
         }
@@ -346,6 +355,7 @@ pub fn ensure_user_config() {
         let config = Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
+            default_agent: AgentBackend::Claude,
             policies: vec![
                 Policy {
                     tool: "Read".into(),
@@ -394,6 +404,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.timeout, 86400);
         assert!((c.poll_interval - 0.5).abs() < f64::EPSILON);
+        assert_eq!(c.default_agent, AgentBackend::Claude);
         assert!(c.policies.is_empty());
         assert!(!c.supervisor.enabled);
         assert_eq!(c.supervisor.model, "haiku");
@@ -404,16 +415,18 @@ mod tests {
         let c = Config::load_single(Path::new("/tmp/nonexistent_cq_config_test.json"));
         assert_eq!(c.timeout, 86400);
         assert!((c.poll_interval - 0.5).abs() < f64::EPSILON);
+        assert_eq!(c.default_agent, AgentBackend::Claude);
         assert!(c.policies.is_empty());
     }
 
     #[test]
     fn test_load_valid_config() {
         let mut f = NamedTempFile::new().unwrap();
-        write!(f, r#"{{"timeout": 300, "poll_interval": 2.0, "policies": [{{"tool": "Bash", "action": "deny"}}], "supervisor": {{"enabled": true, "model": "opus", "rules": ["no secrets"]}}}}"#).unwrap();
+        write!(f, r#"{{"timeout": 300, "poll_interval": 2.0, "default_agent": "codex", "policies": [{{"tool": "Bash", "action": "deny"}}], "supervisor": {{"enabled": true, "model": "opus", "rules": ["no secrets"]}}}}"#).unwrap();
         let c = Config::load_single(f.path());
         assert_eq!(c.timeout, 300);
         assert!((c.poll_interval - 2.0).abs() < f64::EPSILON);
+        assert_eq!(c.default_agent, AgentBackend::Codex);
         assert_eq!(c.policies.len(), 1);
         assert_eq!(c.policies[0].tool, "Bash");
         assert_eq!(c.policies[0].action, "deny");
@@ -429,6 +442,7 @@ mod tests {
         let c = Config::load_single(f.path());
         assert_eq!(c.timeout, 86400);
         assert!(c.policies.is_empty());
+        assert_eq!(c.default_agent, AgentBackend::Claude);
     }
 
     #[test]
@@ -438,6 +452,7 @@ mod tests {
         let config = Config {
             timeout: 999,
             poll_interval: 1.5,
+            default_agent: AgentBackend::Codex,
             policies: vec![Policy {
                 tool: "Write".into(),
                 action: "ask".into(),
@@ -455,6 +470,7 @@ mod tests {
         let loaded = Config::load_single(&path);
         assert_eq!(loaded.timeout, 999);
         assert!((loaded.poll_interval - 1.5).abs() < f64::EPSILON);
+        assert_eq!(loaded.default_agent, AgentBackend::Codex);
         assert_eq!(loaded.policies.len(), 1);
         assert_eq!(loaded.policies[0].pattern, Some("secret".into()));
         assert!(loaded.supervisor.enabled);

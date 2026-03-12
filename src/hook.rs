@@ -4,6 +4,7 @@ use crate::db::Db;
 use crate::policy;
 use crate::supervisor;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -57,7 +58,20 @@ impl HookOutput {
     }
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+enum Decision {
+    Allow,
+    Deny(Option<String>),
+}
+
+pub fn run(agent: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    match agent.unwrap_or("claude") {
+        "claude" => run_claude(),
+        "codex-shell" => run_codex_shell(),
+        other => Err(format!("Unknown hook backend '{other}'").into()),
+    }
+}
+
+fn run_claude() -> Result<(), Box<dyn std::error::Error>> {
     // Only activate for managed sessions
     if std::env::var("CQ_MANAGED").is_err() {
         print_and_exit(HookOutput::allow());
@@ -68,19 +82,49 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::io::stdin().read_to_string(&mut input)?;
     let hook_input: HookInput = serde_json::from_str(&input)?;
 
-    let session_id = hook_input.session_id.unwrap_or_else(|| "unknown".into());
+    let session_id = managed_session_id(hook_input.session_id);
     let tool_name = hook_input.tool_name.unwrap_or_default();
     let tool_input_str = hook_input
         .tool_input
         .map(|v| serde_json::to_string(&v).unwrap_or_default())
         .unwrap_or_default();
 
-    // Load config — use CQ_PROJECT_DIR (set by cq start) to find the project root,
-    // which handles git worktrees correctly. Falls back to cwd.
-    let project_dir = std::env::var("CQ_PROJECT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let config = Config::load(&project_dir);
+    match evaluate_tool_call(&session_id, &tool_name, &tool_input_str)? {
+        Decision::Allow => print_and_exit(HookOutput::allow()),
+        Decision::Deny(reason) => print_and_exit(HookOutput::deny(reason)),
+    }
+}
+
+fn run_codex_shell() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var("CQ_MANAGED").is_err() {
+        return Ok(());
+    }
+
+    let session_id = managed_session_id(None);
+    let command = std::env::var("ZSH_EXECUTION_STRING").unwrap_or_default();
+    if command.trim().is_empty() {
+        return Ok(());
+    }
+
+    let tool_input_str = serde_json::to_string(&json!({ "command": command }))?;
+
+    match evaluate_tool_call(&session_id, "Bash", &tool_input_str)? {
+        Decision::Allow => Ok(()),
+        Decision::Deny(reason) => {
+            if let Some(reason) = reason {
+                eprintln!("{reason}");
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+fn evaluate_tool_call(
+    session_id: &str,
+    tool_name: &str,
+    tool_input_str: &str,
+) -> Result<Decision, Box<dyn std::error::Error>> {
+    let config = load_config();
 
     if let Some(decision) = policy::check(&tool_name, &tool_input_str, &config.policies) {
         match decision.as_str() {
@@ -93,7 +137,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "Allowed by policy",
                     "policy",
                 );
-                print_and_exit(HookOutput::allow());
+                return Ok(Decision::Allow);
             }
             "deny" => {
                 audit::log(
@@ -104,7 +148,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &format!("Denied by policy for tool: {tool_name}"),
                     "policy",
                 );
-                print_and_exit(HookOutput::deny(Some(format!(
+                return Ok(Decision::Deny(Some(format!(
                     "Denied by policy for tool: {tool_name}"
                 ))));
             }
@@ -126,7 +170,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &reason,
                     "supervisor",
                 );
-                print_and_exit(HookOutput::allow());
+                return Ok(Decision::Allow);
             }
             Ok(supervisor::Decision::Escalate { reason, summary }) => {
                 eprintln!("[cq supervisor] escalated: {reason}");
@@ -171,19 +215,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
         if start.elapsed() > timeout {
             db.resolve_tool_call(tc_id, "timed_out", Some("Approval timeout"))?;
-            print_and_exit(HookOutput::deny(Some("Approval timed out".into())));
+            return Ok(Decision::Deny(Some("Approval timed out".into())));
         }
 
         if let Some((status, reason)) = db.get_tool_call_status(tc_id)? {
             match status.as_str() {
-                "approved" => print_and_exit(HookOutput::allow()),
-                "denied" => print_and_exit(HookOutput::deny(reason)),
-                "timed_out" => print_and_exit(HookOutput::deny(Some("Timed out".into()))),
+                "approved" => return Ok(Decision::Allow),
+                "denied" => return Ok(Decision::Deny(reason)),
+                "timed_out" => return Ok(Decision::Deny(Some("Timed out".into()))),
                 "pending" => continue,
                 _ => continue,
             }
         }
     }
+}
+
+fn managed_session_id(hook_session_id: Option<String>) -> String {
+    std::env::var("CQ_SESSION_ID")
+        .ok()
+        .or(hook_session_id)
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn load_config() -> Config {
+    let project_dir = std::env::var("CQ_PROJECT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    Config::load(&project_dir)
 }
 
 fn print_and_exit(output: HookOutput) -> ! {

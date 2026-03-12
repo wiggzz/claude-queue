@@ -1,4 +1,5 @@
 mod audit;
+mod backend;
 mod cli;
 mod config;
 mod db;
@@ -36,12 +37,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("cq {}", env!("CARGO_PKG_VERSION"));
         }
 
-        Commands::Hook => {
-            hook::run()?;
+        Commands::Hook { agent } => {
+            hook::run(Some(&agent))?;
         }
 
-        Commands::Start { prompt, name, cwd } => {
-            let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
+        Commands::Start {
+            prompt,
+            name,
+            cwd,
+            agent,
+        } => {
+            let session_id = session::start(&prompt, name.as_deref(), &cwd, agent)?;
             let display = name.as_deref().unwrap_or(&session_id[..8]);
             println!("Started session: {display} ({session_id})");
         }
@@ -50,8 +56,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             session_id,
             prompt,
             cwd,
+            agent,
         } => {
-            let new_session_id = session::resume(&session_id, &prompt, &cwd)?;
+            let new_session_id = session::resume(&session_id, &prompt, &cwd, agent)?;
             println!("Resumed session: {new_session_id}");
         }
 

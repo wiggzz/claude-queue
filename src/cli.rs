@@ -1,12 +1,13 @@
+use crate::backend::AgentBackend;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "cq",
     version,
-    about = "Claude Queue — orchestrate multiple Claude Code sub-agent sessions",
+    about = "Claude Queue — orchestrate coding-agent sub-sessions with tool-call gating",
     long_about = "\
-Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
+Orchestrate parallel coding-agent sub-sessions with tool-call permission gating.
 
 QUICK START:
   1. cq start \"fix the auth bug\" --name auth-fix --cwd ~/myproject
@@ -57,6 +58,9 @@ pub enum Commands {
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Agent backend to use (default: config default_agent, which defaults to claude)
+        #[arg(long, value_enum)]
+        agent: Option<AgentBackend>,
     },
     /// List all sessions with their status (running, completed, failed)
     List {
@@ -132,6 +136,9 @@ pub enum Commands {
         /// Working directory (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Agent backend to use for raw external session IDs
+        #[arg(long, value_enum)]
+        agent: Option<AgentBackend>,
     },
     /// Block until a session completes: cq wait <name-or-id>
     ///
@@ -178,9 +185,12 @@ pub enum Commands {
     Update,
     /// Print the current version
     Version,
-    /// [internal] Hook entry point called by Claude Code's PreToolUse system
+    /// [internal] Hook entry point called by backend-specific tool interception
     #[command(hide = true)]
-    Hook,
+    Hook {
+        #[arg(default_value = "claude")]
+        agent: String,
+    },
 }
 
 #[derive(Subcommand)]

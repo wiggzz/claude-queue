@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use crate::config;
 use crate::db::Db;
 use std::fs;
@@ -9,75 +10,107 @@ pub fn start(
     prompt: &str,
     name: Option<&str>,
     cwd: &str,
+    backend: Option<AgentBackend>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let cwd_abs = fs::canonicalize(cwd)?;
+    let project_root = resolve_project_root(&cwd_abs);
+    let config = config::Config::load(&project_root);
+    let backend = backend.unwrap_or(config.default_agent);
     let session_id = uuid::Uuid::new_v4().to_string();
-    let args = vec![
-        "-p".to_string(),
-        "--session-id".to_string(),
-        session_id.clone(),
-        prompt.to_string(),
-    ];
-    launch(&session_id, Some(&session_id), name, prompt, cwd, args)
+    let external_session_id = match backend {
+        AgentBackend::Claude => Some(session_id.clone()),
+        AgentBackend::Codex => None,
+    };
+    launch(
+        &session_id,
+        backend,
+        external_session_id.as_deref(),
+        name,
+        prompt,
+        &cwd_abs,
+        LaunchMode::Start { prompt },
+    )
 }
 
-/// Resume a session. Accepts either a cq session ID prefix or a raw claude session ID.
-/// Looks up the claude_session_id from the DB if it's a cq prefix, otherwise uses it directly.
+/// Resume a session. Accepts either a cq session ID prefix or a raw backend session ID.
+/// Looks up the backend session ID from the DB if it's a cq prefix, otherwise uses it directly.
 pub fn resume(
     id_or_prefix: &str,
     prompt: &str,
     cwd: &str,
+    backend: Option<AgentBackend>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let db = Db::open(&config::db_path())?;
+    let cwd_abs = fs::canonicalize(cwd)?;
+    let project_root = resolve_project_root(&cwd_abs);
+    let cfg = config::Config::load(&project_root);
 
-    // Try to find by cq session prefix first, then by claude session ID
-    let claude_sid = if let Some(sess) = db.find_session(id_or_prefix)? {
-        // Found a cq session — use its claude_session_id, falling back to session_id
-        sess.claude_session_id.unwrap_or(sess.session_id)
-    } else {
-        // Not in our DB — treat as a raw claude session ID
-        id_or_prefix.to_string()
-    };
+    // Try to find by cq session prefix first, then by backend session ID
+    let (agent_backend, external_session_id, name) =
+        if let Some(sess) = db.find_session(id_or_prefix)? {
+            let agent_backend = sess.agent_backend;
+            if let Some(requested_backend) = backend
+                && requested_backend != agent_backend
+            {
+                return Err(format!(
+                    "Session '{}' uses backend '{}', not '{}'",
+                    id_or_prefix,
+                    agent_backend.as_str(),
+                    requested_backend.as_str()
+                )
+                .into());
+            }
+
+            let external_session_id = resolve_external_session_id(&sess)?;
+            (agent_backend, external_session_id, sess.name)
+        } else {
+            (
+                backend.unwrap_or(cfg.default_agent),
+                id_or_prefix.to_string(),
+                None,
+            )
+        };
 
     let cq_session_id = uuid::Uuid::new_v4().to_string();
-    let args = vec![
-        "-p".to_string(),
-        "--session-id".to_string(),
-        claude_sid.clone(),
-        prompt.to_string(),
-    ];
-    // Inherit the name from the original session if it had one
-    let name = if let Some(sess) = db.find_session(id_or_prefix)? {
-        sess.name
-    } else {
-        None
-    };
-
     let display_prompt = format!(
         "[resumed {}] {}",
-        &claude_sid[..8.min(claude_sid.len())],
+        &external_session_id[..8.min(external_session_id.len())],
         prompt
     );
     launch(
         &cq_session_id,
-        Some(&claude_sid),
+        agent_backend,
+        Some(&external_session_id),
         name.as_deref(),
         &display_prompt,
-        cwd,
-        args,
+        &cwd_abs,
+        LaunchMode::Resume {
+            external_session_id: &external_session_id,
+            prompt,
+        },
     )
 }
 
-/// Common launch logic for both start and resume.
+enum LaunchMode<'a> {
+    Start {
+        prompt: &'a str,
+    },
+    Resume {
+        external_session_id: &'a str,
+        prompt: &'a str,
+    },
+}
+
 fn launch(
     session_id: &str,
-    claude_session_id: Option<&str>,
+    backend: AgentBackend,
+    agent_session_id: Option<&str>,
     name: Option<&str>,
     prompt_display: &str,
-    cwd: &str,
-    extra_args: Vec<String>,
+    cwd_abs: &Path,
+    mode: LaunchMode<'_>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let cwd_abs = fs::canonicalize(cwd)?;
-    let project_root = resolve_project_root(&cwd_abs);
+    let project_root = resolve_project_root(cwd_abs);
     let db_path = config::db_path();
     let log_dir = config::log_dir();
     fs::create_dir_all(&log_dir)?;
@@ -87,43 +120,22 @@ fn launch(
     let stderr_path = log_dir.join(format!("{session_id}.stderr"));
     let stderr_file = fs::File::create(&stderr_path)?;
 
-    // Build the hook settings JSON
     let cq_bin = std::env::current_exe().unwrap_or_else(|_| "cq".into());
-    let hook_command = format!("{} hook", cq_bin.display());
-    let settings = serde_json::json!({
-        "hooks": {
-            "PreToolUse": [{
-                "matcher": "*",
-                "hooks": [{
-                    "type": "command",
-                    "command": hook_command,
-                    "timeout": 90000
-                }]
-            }]
-        }
-    });
-    let settings_str = serde_json::to_string(&settings)?;
+    let mut cmd = match backend {
+        AgentBackend::Claude => build_claude_command(&cq_bin, session_id, mode)?,
+        AgentBackend::Codex => build_codex_command(&cq_bin, session_id, mode)?,
+    };
 
-    let mut cmd = Command::new("claude");
-    for arg in &extra_args {
-        cmd.arg(arg);
-    }
     let child = cmd
-        .args([
-            "--settings",
-            &settings_str,
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
-        ])
         .env("CQ_MANAGED", "1")
+        .env("CQ_AGENT_BACKEND", backend.as_str())
+        .env("CQ_SESSION_ID", session_id)
         .env("CQ_DB", db_path.to_string_lossy().as_ref())
         .env("CQ_PROJECT_DIR", project_root.to_string_lossy().as_ref())
         .env("CQ_SESSION_CWD", cwd_abs.to_string_lossy().as_ref())
         .env("CQ_SESSION_NAME", name.unwrap_or(""))
         .env("CQ_SESSION_PROMPT", prompt_display)
-        .env_remove("CLAUDECODE")
-        .current_dir(&cwd_abs)
+        .current_dir(cwd_abs)
         .stdout(log_file)
         .stderr(stderr_file)
         .spawn()?;
@@ -134,7 +146,8 @@ fn launch(
     let db = Db::open(&db_path)?;
     db.create_session(
         session_id,
-        claude_session_id,
+        backend,
+        agent_session_id,
         name,
         prompt_display,
         &cwd_abs.to_string_lossy(),
@@ -196,11 +209,16 @@ pub fn resolve_dead_session(db: &crate::db::Db, session_id: &str) -> String {
 }
 
 pub fn get_output(session_id: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let log_path = config::log_dir().join(format!("{session_id}.log"));
+    let db = Db::open(&config::db_path())?;
+    let sess = db
+        .find_session(session_id)?
+        .ok_or_else(|| format!("No session matching '{session_id}'"))?;
+    let log_path = config::log_dir().join(format!("{}.log", sess.session_id));
     if !log_path.exists() {
-        return Err(format!("No log file found for session {session_id}").into());
+        return Err(format!("No log file found for session {}", sess.session_id).into());
     }
-    Ok(fs::read_to_string(&log_path)?)
+    let raw = fs::read_to_string(&log_path)?;
+    Ok(sess.agent_backend.extract_output(&raw))
 }
 
 pub fn get_stderr(session_id: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -221,6 +239,132 @@ pub fn kill_session(pid: i64) -> Result<(), Box<dyn std::error::Error>> {
         Command::new("kill").arg(pid.to_string()).status()?;
     }
     Ok(())
+}
+
+fn resolve_external_session_id(
+    sess: &crate::db::Session,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(session_id) = sess
+        .agent_session_id
+        .clone()
+        .or(sess.claude_session_id.clone())
+    {
+        return Ok(session_id);
+    }
+
+    if sess.agent_backend == AgentBackend::Claude {
+        return Ok(sess.session_id.clone());
+    }
+
+    let log_path = config::log_dir().join(format!("{}.log", sess.session_id));
+    let raw = fs::read_to_string(&log_path)?;
+    sess.agent_backend
+        .extract_external_session_id(&raw)
+        .ok_or_else(|| {
+            format!(
+                "Could not determine {} session ID for '{}'",
+                sess.agent_backend.as_str(),
+                sess.session_id
+            )
+            .into()
+        })
+}
+
+fn build_claude_command(
+    cq_bin: &std::path::Path,
+    session_id: &str,
+    mode: LaunchMode<'_>,
+) -> Result<Command, Box<dyn std::error::Error>> {
+    let hook_command = format!("{} hook", cq_bin.display());
+    let settings = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 90000
+                }]
+            }]
+        }
+    });
+    let settings_str = serde_json::to_string(&settings)?;
+
+    let mut cmd = Command::new("claude");
+    match mode {
+        LaunchMode::Start { prompt } => {
+            cmd.args(["-p", "--session-id", session_id, prompt]);
+        }
+        LaunchMode::Resume {
+            external_session_id,
+            prompt,
+        } => {
+            cmd.args(["-p", "--session-id", external_session_id, prompt]);
+        }
+    }
+
+    cmd.args([
+        "--settings",
+        &settings_str,
+        "--permission-mode",
+        "bypassPermissions",
+        "--dangerously-skip-permissions",
+    ])
+    .env_remove("CLAUDECODE");
+
+    Ok(cmd)
+}
+
+fn build_codex_command(
+    cq_bin: &std::path::Path,
+    session_id: &str,
+    mode: LaunchMode<'_>,
+) -> Result<Command, Box<dyn std::error::Error>> {
+    let hook_dir = config::log_dir().join("codex-shell-hooks").join(session_id);
+    fs::create_dir_all(&hook_dir)?;
+    write_codex_zshenv(cq_bin, &hook_dir)?;
+
+    let mut cmd = Command::new("codex");
+    cmd.args(["-a", "never", "-s", "workspace-write"]);
+
+    match mode {
+        LaunchMode::Start { prompt } => {
+            cmd.args(["exec", "--json", "--skip-git-repo-check", prompt]);
+        }
+        LaunchMode::Resume {
+            external_session_id,
+            prompt,
+        } => {
+            cmd.args([
+                "exec",
+                "resume",
+                external_session_id,
+                prompt,
+                "--json",
+                "--skip-git-repo-check",
+            ]);
+        }
+    }
+
+    cmd.env("ZDOTDIR", hook_dir).env("CQ_CODEX_SHELL_HOOK", "1");
+
+    Ok(cmd)
+}
+
+fn write_codex_zshenv(
+    cq_bin: &std::path::Path,
+    hook_dir: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let cq_bin = sh_single_quote(&cq_bin.to_string_lossy());
+    let script = format!(
+        "if [[ -n \"${{CQ_CODEX_SHELL_HOOK:-}}\" && -n \"${{ZSH_EXECUTION_STRING:-}}\" && -z \"${{CQ_CODEX_SHELL_HOOK_ACTIVE:-}}\" ]]; then\n  export CQ_CODEX_SHELL_HOOK_ACTIVE=1\n  {cq_bin} hook codex-shell\n  cq_hook_rc=$?\n  if [[ $cq_hook_rc -ne 0 ]]; then\n    exit $cq_hook_rc\n  fi\nfi\n"
+    );
+    fs::write(hook_dir.join(".zshenv"), script)?;
+    Ok(())
+}
+
+fn sh_single_quote(input: &str) -> String {
+    format!("'{}'", input.replace('\'', "'\"'\"'"))
 }
 
 /// Resolve the project root directory, handling git worktrees.
