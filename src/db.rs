@@ -237,3 +237,154 @@ impl Db {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::NamedTempFile;
+
+    fn open_temp_db() -> Db {
+        let tmp = NamedTempFile::new().unwrap();
+        Db::open(tmp.path()).unwrap()
+    }
+
+    #[test]
+    fn test_create_and_get_sessions() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "do stuff", "/tmp", 1234).unwrap();
+        let sessions = db.get_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "s1");
+        assert_eq!(sessions[0].prompt, "do stuff");
+        assert_eq!(sessions[0].cwd, "/tmp");
+        assert_eq!(sessions[0].status, "running");
+    }
+
+    #[test]
+    fn test_find_session_by_name() {
+        let db = open_temp_db();
+        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", 1).unwrap();
+        db.create_session("s2", None, Some("beta"), "p2", "/tmp", 2).unwrap();
+        let found = db.find_session("alpha").unwrap().unwrap();
+        assert_eq!(found.session_id, "s1");
+        let found = db.find_session("beta").unwrap().unwrap();
+        assert_eq!(found.session_id, "s2");
+        assert!(db.find_session("gamma").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_find_session_by_id_prefix() {
+        let db = open_temp_db();
+        db.create_session("abc-123-def", None, None, "p", "/tmp", 1).unwrap();
+        let found = db.find_session("abc").unwrap().unwrap();
+        assert_eq!(found.session_id, "abc-123-def");
+        assert!(db.find_session("xyz").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_update_session_status() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "p", "/tmp", 1).unwrap();
+        db.update_session_status("s1", "completed", Some(0)).unwrap();
+        let sessions = db.get_sessions().unwrap();
+        assert_eq!(sessions[0].status, "completed");
+        assert!(sessions[0].completed_at.is_some());
+        assert_eq!(sessions[0].exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_insert_and_get_tool_call() {
+        let db = open_temp_db();
+        let id = db.insert_tool_call("s1", "Bash", r#"{"command":"ls"}"#).unwrap();
+        let tc = db.get_tool_call_by_id(id).unwrap().unwrap();
+        assert_eq!(tc.session_id, "s1");
+        assert_eq!(tc.tool_name, "Bash");
+        assert_eq!(tc.tool_input, r#"{"command":"ls"}"#);
+        assert_eq!(tc.status, "pending");
+        assert!(tc.resolved_at.is_none());
+    }
+
+    #[test]
+    fn test_resolve_tool_call() {
+        let db = open_temp_db();
+        let id = db.insert_tool_call("s1", "Bash", "input").unwrap();
+        let changed = db.resolve_tool_call(id, "approved", None).unwrap();
+        assert!(changed);
+        let tc = db.get_tool_call_by_id(id).unwrap().unwrap();
+        assert_eq!(tc.status, "approved");
+        assert!(tc.resolved_at.is_some());
+    }
+
+    #[test]
+    fn test_resolve_already_resolved() {
+        let db = open_temp_db();
+        let id = db.insert_tool_call("s1", "Bash", "input").unwrap();
+        assert!(db.resolve_tool_call(id, "approved", None).unwrap());
+        let changed = db.resolve_tool_call(id, "denied", Some("nope")).unwrap();
+        assert!(!changed);
+        // Status should still be approved from first resolve
+        let tc = db.get_tool_call_by_id(id).unwrap().unwrap();
+        assert_eq!(tc.status, "approved");
+    }
+
+    #[test]
+    fn test_get_pending_tool_calls() {
+        let db = open_temp_db();
+        let id1 = db.insert_tool_call("s1", "Bash", "a").unwrap();
+        let _id2 = db.insert_tool_call("s1", "Read", "b").unwrap();
+        let _id3 = db.insert_tool_call("s1", "Write", "c").unwrap();
+        db.resolve_tool_call(id1, "approved", None).unwrap();
+        let pending = db.get_pending_tool_calls(None).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|tc| tc.status == "pending"));
+    }
+
+    #[test]
+    fn test_get_pending_with_session_filter() {
+        let db = open_temp_db();
+        db.insert_tool_call("sess-aaa", "Bash", "a").unwrap();
+        db.insert_tool_call("sess-bbb", "Read", "b").unwrap();
+        db.insert_tool_call("sess-aaa", "Write", "c").unwrap();
+        let pending = db.get_pending_tool_calls(Some("sess-aaa")).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|tc| tc.session_id == "sess-aaa"));
+    }
+
+    #[test]
+    fn test_approve_all_pending() {
+        let db = open_temp_db();
+        db.insert_tool_call("s1", "Bash", "a").unwrap();
+        db.insert_tool_call("s1", "Read", "b").unwrap();
+        db.insert_tool_call("s1", "Write", "c").unwrap();
+        let count = db.approve_all_pending().unwrap();
+        assert_eq!(count, 3);
+        let pending = db.get_pending_tool_calls(None).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn test_approve_all_for_session() {
+        let db = open_temp_db();
+        db.insert_tool_call("s1", "Bash", "a").unwrap();
+        db.insert_tool_call("s2", "Read", "b").unwrap();
+        db.insert_tool_call("s1", "Write", "c").unwrap();
+        let count = db.approve_all_pending_for_session("s1").unwrap();
+        assert_eq!(count, 2);
+        let pending = db.get_pending_tool_calls(None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session_id, "s2");
+    }
+
+    #[test]
+    fn test_approve_all_for_tool() {
+        let db = open_temp_db();
+        db.insert_tool_call("s1", "Bash", "a").unwrap();
+        db.insert_tool_call("s1", "Read", "b").unwrap();
+        db.insert_tool_call("s1", "Bash", "c").unwrap();
+        let count = db.approve_all_pending_for_tool("Bash").unwrap();
+        assert_eq!(count, 2);
+        let pending = db.get_pending_tool_calls(None).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].tool_name, "Read");
+    }
+}
