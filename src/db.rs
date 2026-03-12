@@ -12,7 +12,6 @@ pub struct Session {
     pub session_id: String,
     pub agent_backend: AgentBackend,
     pub agent_session_id: Option<String>,
-    pub claude_session_id: Option<String>,
     pub name: Option<String>,
     pub prompt: String,
     pub _cwd: String,
@@ -36,7 +35,7 @@ pub struct ToolCall {
     pub resolved_at: Option<String>,
 }
 
-const SESSION_COLS: &str = "id, session_id, agent_backend, agent_session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
+const SESSION_COLS: &str = "id, session_id, agent_backend, agent_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
 
 fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -44,15 +43,14 @@ fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         session_id: row.get(1)?,
         agent_backend: AgentBackend::from_db(&row.get::<_, String>(2)?),
         agent_session_id: row.get(3)?,
-        claude_session_id: row.get(4)?,
-        name: row.get(5)?,
-        prompt: row.get(6)?,
-        _cwd: row.get(7)?,
-        status: row.get(8)?,
-        pid: row.get(9)?,
-        started_at: row.get(10)?,
-        _completed_at: row.get(11)?,
-        _exit_code: row.get(12)?,
+        name: row.get(4)?,
+        prompt: row.get(5)?,
+        _cwd: row.get(6)?,
+        status: row.get(7)?,
+        pid: row.get(8)?,
+        started_at: row.get(9)?,
+        _completed_at: row.get(10)?,
+        _exit_code: row.get(11)?,
     })
 }
 
@@ -75,7 +73,6 @@ impl Db {
                 session_id TEXT UNIQUE NOT NULL,
                 agent_backend TEXT NOT NULL DEFAULT 'claude',
                 agent_session_id TEXT,
-                claude_session_id TEXT,
                 name TEXT,
                 prompt TEXT NOT NULL,
                 cwd TEXT NOT NULL,
@@ -109,13 +106,9 @@ impl Db {
             [],
         );
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
         let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
-        let _ = conn.execute(
-            "UPDATE sessions SET agent_session_id = COALESCE(agent_session_id, claude_session_id) WHERE agent_session_id IS NULL",
-            [],
-        );
+        Self::migrate_sessions_schema(&conn)?;
         Ok(Db { conn })
     }
 
@@ -132,16 +125,11 @@ impl Db {
         pid: u32,
     ) -> rusqlite::Result<()> {
         self.conn.execute(
-            "INSERT INTO sessions (session_id, agent_backend, agent_session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO sessions (session_id, agent_backend, agent_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 session_id,
                 agent_backend.as_str(),
                 agent_session_id,
-                if agent_backend == AgentBackend::Claude {
-                    agent_session_id
-                } else {
-                    None
-                },
                 name,
                 prompt,
                 cwd,
@@ -175,7 +163,7 @@ impl Db {
     /// Name is an exact match; IDs are prefix matches. Most recent match wins.
     pub fn find_session(&self, query: &str) -> rusqlite::Result<Option<Session>> {
         let sql = format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 OR session_id LIKE ?1 || '%' OR agent_session_id LIKE ?1 || '%' OR claude_session_id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1"
+            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 OR session_id LIKE ?1 || '%' OR agent_session_id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![query], map_session)?;
@@ -209,6 +197,91 @@ impl Db {
             map.insert(id, name);
         }
         Ok(map)
+    }
+
+    fn migrate_sessions_schema(conn: &Connection) -> rusqlite::Result<()> {
+        if Self::column_exists(conn, "sessions", "claude_session_id")? {
+            conn.execute_batch(
+                "
+                BEGIN IMMEDIATE;
+                CREATE TABLE sessions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,
+                    agent_backend TEXT NOT NULL DEFAULT 'claude',
+                    agent_session_id TEXT,
+                    name TEXT,
+                    prompt TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    pid INTEGER,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    completed_at TEXT,
+                    exit_code INTEGER
+                );
+                INSERT INTO sessions_new (
+                    id,
+                    session_id,
+                    agent_backend,
+                    agent_session_id,
+                    name,
+                    prompt,
+                    cwd,
+                    status,
+                    pid,
+                    started_at,
+                    completed_at,
+                    exit_code
+                )
+                SELECT
+                    id,
+                    session_id,
+                    COALESCE(agent_backend, 'claude'),
+                    CASE
+                        WHEN agent_session_id IS NOT NULL THEN agent_session_id
+                        WHEN COALESCE(agent_backend, 'claude') = 'claude' THEN COALESCE(claude_session_id, session_id)
+                        ELSE claude_session_id
+                    END,
+                    name,
+                    prompt,
+                    cwd,
+                    status,
+                    pid,
+                    started_at,
+                    completed_at,
+                    exit_code
+                FROM sessions;
+                DROP TABLE sessions;
+                ALTER TABLE sessions_new RENAME TO sessions;
+                CREATE INDEX IF NOT EXISTS idx_sessions_status
+                    ON sessions(status);
+                COMMIT;
+            ",
+            )?;
+        }
+
+        conn.execute(
+            "UPDATE sessions
+             SET agent_session_id = session_id
+             WHERE agent_session_id IS NULL
+               AND agent_backend = 'claude'",
+            [],
+        )?;
+
+        Ok(())
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut stmt = conn.prepare(&pragma)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+        for name in rows {
+            if name? == column {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     // --- Tool Calls ---
@@ -494,6 +567,43 @@ mod tests {
         assert_eq!(sessions[0].status, "completed");
         assert!(sessions[0]._completed_at.is_some());
         assert_eq!(sessions[0]._exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_migrates_legacy_claude_session_ids_to_agent_session_id() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                claude_session_id TEXT,
+                name TEXT,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                pid INTEGER,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                exit_code INTEGER
+            );
+        ",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params!["cq-1", "claude-123", "alpha", "p1", "/tmp", 1_i64],
+        )
+        .unwrap();
+        drop(conn);
+
+        let db = Db::open(tmp.path()).unwrap();
+        let found = db.find_session("claude-123").unwrap().unwrap();
+        assert_eq!(found.session_id, "cq-1");
+        assert_eq!(found.agent_backend, AgentBackend::Claude);
+        assert_eq!(found.agent_session_id.as_deref(), Some("claude-123"));
+        assert!(!Db::column_exists(&db.conn, "sessions", "claude_session_id").unwrap());
     }
 
     #[test]

@@ -244,11 +244,7 @@ pub fn kill_session(pid: i64) -> Result<(), Box<dyn std::error::Error>> {
 fn resolve_external_session_id(
     sess: &crate::db::Session,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    if let Some(session_id) = sess
-        .agent_session_id
-        .clone()
-        .or(sess.claude_session_id.clone())
-    {
+    if let Some(session_id) = sess.agent_session_id.clone() {
         return Ok(session_id);
     }
 
