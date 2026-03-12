@@ -195,6 +195,17 @@ impl Db {
         rows.collect()
     }
 
+    pub fn get_tool_call_by_id(&self, id: i64) -> rusqlite::Result<Option<ToolCall>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE id = ?1"
+        )?;
+        let mut rows = stmt.query_map(params![id], Self::map_tool_call)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row?)),
+            None => Ok(None),
+        }
+    }
+
     pub fn approve_all_pending(&self) -> rusqlite::Result<usize> {
         let changed = self.conn.execute(
             "UPDATE tool_calls SET status = 'approved', resolved_at = datetime('now') WHERE status = 'pending'",

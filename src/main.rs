@@ -9,7 +9,7 @@ mod session;
 mod watch;
 
 use clap::Parser;
-use cli::{Cli, Commands, PolicyCommands, SessionsCommands};
+use cli::{Cli, Commands, PendingCommands, PolicyCommands, SessionsCommands};
 use config::Config;
 
 fn main() {
@@ -78,28 +78,93 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Pending { session, wait } => {
+        Commands::Pending { session, wait, full, command } => {
             let db = open_db()?;
 
-            if wait {
-                // Snapshot current pending IDs so we only react to new ones
-                let mut known_ids: std::collections::HashSet<i64> = db
-                    .get_pending_tool_calls(session.as_deref())?
-                    .iter()
-                    .map(|tc| tc.id)
-                    .collect();
-
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let current = db.get_pending_tool_calls(session.as_deref())?;
-                    let new_calls: Vec<_> = current
-                        .into_iter()
-                        .filter(|tc| !known_ids.contains(&tc.id))
+            match command {
+                Some(PendingCommands::Show { id }) => {
+                    let tc = db.get_tool_call_by_id(id)?
+                        .ok_or_else(|| format!("No tool call with ID {id}"))?;
+                    println!("ID:        {}", tc.id);
+                    println!("Session:   {}", tc.session_id);
+                    println!("Tool:      {}", tc.tool_name);
+                    println!("Status:    {}", tc.status);
+                    println!("Created:   {}", tc.created_at);
+                    if let Some(resolved) = &tc.resolved_at {
+                        println!("Resolved:  {resolved}");
+                    }
+                    if let Some(reason) = &tc.reason {
+                        println!("Reason:    {reason}");
+                    }
+                    println!("\nInput:");
+                    match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
+                        Ok(val) => println!("{}", serde_json::to_string_pretty(&val).unwrap()),
+                        Err(_) => println!("{}", tc.tool_input),
+                    }
+                }
+                None if wait => {
+                    // Snapshot current pending IDs so we only react to new ones
+                    let mut known_ids: std::collections::HashSet<i64> = db
+                        .get_pending_tool_calls(session.as_deref())?
+                        .iter()
+                        .map(|tc| tc.id)
                         .collect();
-                    if !new_calls.is_empty() {
+
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        let current = db.get_pending_tool_calls(session.as_deref())?;
+                        let new_calls: Vec<_> = current
+                            .into_iter()
+                            .filter(|tc| !known_ids.contains(&tc.id))
+                            .collect();
+                        if !new_calls.is_empty() {
+                            println!("{:<6} {:<10} {:<15} {:<20} {}",
+                                "ID", "SESSION", "TOOL", "SINCE", "INPUT");
+                            for tc in &new_calls {
+                                let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
+                                println!("{:<6} {:<10} {:<15} {:<20} {}",
+                                    tc.id,
+                                    &tc.session_id[..8.min(tc.session_id.len())],
+                                    tc.tool_name,
+                                    &tc.created_at,
+                                    input_short,
+                                );
+                            }
+                            return Ok(());
+                        }
+                        // Accumulate known IDs (don't replace — avoids missing
+                        // new calls that appear while resolved ones disappear)
+                        for tc in db.get_pending_tool_calls(session.as_deref())? {
+                            known_ids.insert(tc.id);
+                        }
+                    }
+                }
+                None => {
+                    let pending = db.get_pending_tool_calls(session.as_deref())?;
+                    if pending.is_empty() {
+                        println!("No pending approvals.");
+                        return Ok(());
+                    }
+                    if full {
+                        for (i, tc) in pending.iter().enumerate() {
+                            if i > 0 {
+                                println!("{}", "-".repeat(60));
+                            }
+                            println!("ID:        {}", tc.id);
+                            println!("Session:   {}", &tc.session_id[..8.min(tc.session_id.len())]);
+                            println!("Tool:      {}", tc.tool_name);
+                            println!("Since:     {}", tc.created_at);
+                            println!("\nInput:");
+                            match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
+                                Ok(val) => println!("{}", serde_json::to_string_pretty(&val).unwrap()),
+                                Err(_) => println!("{}", tc.tool_input),
+                            }
+                            println!();
+                        }
+                    } else {
                         println!("{:<6} {:<10} {:<15} {:<20} {}",
                             "ID", "SESSION", "TOOL", "SINCE", "INPUT");
-                        for tc in &new_calls {
+                        for tc in &pending {
                             let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
                             println!("{:<6} {:<10} {:<15} {:<20} {}",
                                 tc.id,
@@ -109,31 +174,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 input_short,
                             );
                         }
-                        return Ok(());
                     }
-                    // Accumulate known IDs (don't replace — avoids missing
-                    // new calls that appear while resolved ones disappear)
-                    for tc in db.get_pending_tool_calls(session.as_deref())? {
-                        known_ids.insert(tc.id);
-                    }
-                }
-            } else {
-                let pending = db.get_pending_tool_calls(session.as_deref())?;
-                if pending.is_empty() {
-                    println!("No pending approvals.");
-                    return Ok(());
-                }
-                println!("{:<6} {:<10} {:<15} {:<20} {}",
-                    "ID", "SESSION", "TOOL", "SINCE", "INPUT");
-                for tc in &pending {
-                    let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
-                    println!("{:<6} {:<10} {:<15} {:<20} {}",
-                        tc.id,
-                        &tc.session_id[..8.min(tc.session_id.len())],
-                        tc.tool_name,
-                        &tc.created_at,
-                        input_short,
-                    );
                 }
             }
         }

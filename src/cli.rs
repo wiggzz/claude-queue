@@ -53,6 +53,7 @@ pub enum Commands {
         session: Option<String>,
     },
     /// Show tool calls waiting for your approval
+    #[command(args_conflicts_with_subcommands = true)]
     Pending {
         /// Filter by session ID (prefix match)
         #[arg(long)]
@@ -60,6 +61,11 @@ pub enum Commands {
         /// Block until a new pending tool call appears, print it, then exit
         #[arg(long, short)]
         wait: bool,
+        /// Show full (untruncated) tool input for all pending calls
+        #[arg(long)]
+        full: bool,
+        #[command(subcommand)]
+        command: Option<PendingCommands>,
     },
     /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>]
     Approve {
@@ -123,6 +129,15 @@ pub enum Commands {
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
+}
+
+#[derive(Subcommand)]
+pub enum PendingCommands {
+    /// Show full details for a specific tool call by ID
+    Show {
+        /// Tool call ID
+        id: i64,
+    },
 }
 
 #[derive(Subcommand)]
