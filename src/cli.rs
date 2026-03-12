@@ -57,6 +57,9 @@ pub enum Commands {
         /// Filter by session ID (prefix match)
         #[arg(long)]
         session: Option<String>,
+        /// Block until a new pending tool call appears, print it, then exit
+        #[arg(long, short)]
+        wait: bool,
     },
     /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>]
     Approve {
