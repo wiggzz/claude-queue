@@ -70,7 +70,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<PendingCommands>,
     },
-    /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>] [--tool <name>]
+    /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>] [--tool <name>] [--match <regex>]
     Approve {
         /// Tool call ID (number) or "all" to approve everything pending
         id: String,
@@ -80,6 +80,9 @@ pub enum Commands {
         /// Only approve tool calls for this tool type (e.g. "Bash", "Edit", "Write")
         #[arg(long)]
         tool: Option<String>,
+        /// Only approve tool calls whose tool_input matches this regex (for Bash, matches the "command" field)
+        #[arg(long = "match")]
+        match_pattern: Option<String>,
     },
     /// Deny a pending tool call: cq deny <id> [--reason "..."]
     Deny {

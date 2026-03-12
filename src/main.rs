@@ -229,36 +229,83 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Approve { id, session, tool } => {
+        Commands::Approve { id, session, tool, match_pattern } => {
             let db = open_db()?;
             if id == "all" {
-                match (session, tool) {
-                    (Some(session_filter), Some(tool_name)) => {
-                        let sess = db.find_session(&session_filter)?
-                            .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
-                        let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
-                        let count = db.approve_all_pending_for_session_and_tool(&sess.session_id, &tool_name)?;
-                        println!("Approved {count} pending {tool_name} call(s) for session {display}.");
+                if let Some(ref pattern) = match_pattern {
+                    // --match mode: fetch pending calls, filter by regex, approve individually
+                    let re = regex::Regex::new(pattern)
+                        .map_err(|e| format!("Invalid regex '{}': {}", pattern, e))?;
+
+                    // Resolve session filter to a session_id prefix
+                    let session_id_prefix = match &session {
+                        Some(session_filter) => {
+                            let sess = db.find_session(session_filter)?
+                                .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
+                            Some(sess.session_id)
+                        }
+                        None => None,
+                    };
+
+                    let pending = db.get_pending_tool_calls(session_id_prefix.as_deref())?;
+                    let mut count = 0usize;
+                    for tc in &pending {
+                        // Filter by tool type if specified
+                        if let Some(ref tool_name) = tool {
+                            if tc.tool_name != *tool_name {
+                                continue;
+                            }
+                        }
+                        // Extract the text to match against: for Bash, use "command" field; otherwise raw tool_input
+                        let match_text = match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
+                            Ok(val) => {
+                                if tc.tool_name == "Bash" {
+                                    val.get("command")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(&tc.tool_input)
+                                        .to_string()
+                                } else {
+                                    tc.tool_input.clone()
+                                }
+                            }
+                            Err(_) => tc.tool_input.clone(),
+                        };
+                        if re.is_match(&match_text) {
+                            db.resolve_tool_call(tc.id, "approved", None)?;
+                            count += 1;
+                        }
                     }
-                    (Some(session_filter), None) => {
-                        let sess = db.find_session(&session_filter)?
-                            .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
-                        let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
-                        let count = db.approve_all_pending_for_session(&sess.session_id)?;
-                        println!("Approved {count} pending tool call(s) for session {display}.");
-                    }
-                    (None, Some(tool_name)) => {
-                        let count = db.approve_all_pending_for_tool(&tool_name)?;
-                        println!("Approved {count} pending {tool_name} call(s).");
-                    }
-                    (None, None) => {
-                        let count = db.approve_all_pending()?;
-                        println!("Approved {count} pending tool call(s).");
+                    println!("Approved {count} pending tool call(s) matching /{pattern}/.");
+                } else {
+                    // Original behavior without --match
+                    match (session, tool) {
+                        (Some(session_filter), Some(tool_name)) => {
+                            let sess = db.find_session(&session_filter)?
+                                .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
+                            let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                            let count = db.approve_all_pending_for_session_and_tool(&sess.session_id, &tool_name)?;
+                            println!("Approved {count} pending {tool_name} call(s) for session {display}.");
+                        }
+                        (Some(session_filter), None) => {
+                            let sess = db.find_session(&session_filter)?
+                                .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
+                            let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                            let count = db.approve_all_pending_for_session(&sess.session_id)?;
+                            println!("Approved {count} pending tool call(s) for session {display}.");
+                        }
+                        (None, Some(tool_name)) => {
+                            let count = db.approve_all_pending_for_tool(&tool_name)?;
+                            println!("Approved {count} pending {tool_name} call(s).");
+                        }
+                        (None, None) => {
+                            let count = db.approve_all_pending()?;
+                            println!("Approved {count} pending tool call(s).");
+                        }
                     }
                 }
             } else {
-                if session.is_some() || tool.is_some() {
-                    return Err("--session and --tool can only be used with 'cq approve all'".into());
+                if session.is_some() || tool.is_some() || match_pattern.is_some() {
+                    return Err("--session, --tool, and --match can only be used with 'cq approve all'".into());
                 }
                 let id: i64 = id.parse().map_err(|_| "Invalid ID. Use a number or 'all'.")?;
                 if db.resolve_tool_call(id, "approved", None)? {
