@@ -19,6 +19,11 @@ pub struct SupervisorConfig {
     pub model: String,
     #[serde(default)]
     pub rules: Vec<String>,
+    /// Whether to include the agent's session prompt/task in the supervisor context.
+    /// Default: false. When false, the supervisor evaluates tool calls purely on their
+    /// own merit, preventing the agent's prompt from biasing approval decisions.
+    #[serde(default)]
+    pub include_session_context: bool,
 }
 
 impl Default for SupervisorConfig {
@@ -27,6 +32,7 @@ impl Default for SupervisorConfig {
             enabled: false,
             model: default_supervisor_model(),
             rules: Vec::new(),
+            include_session_context: false,
         }
     }
 }
@@ -104,6 +110,8 @@ impl Config {
                 rules.extend(user_config.supervisor.rules);
                 rules
             },
+            include_session_context: project_config.supervisor.include_session_context
+                || user_config.supervisor.include_session_context,
         };
 
         Config {
@@ -195,6 +203,7 @@ pub fn ensure_user_config() {
                 enabled: true,
                 model: default_supervisor_model(),
                 rules: Vec::new(),
+                include_session_context: false,
             },
         };
         let _ = config.save(&path);
@@ -265,6 +274,7 @@ mod tests {
                 enabled: true,
                 model: "sonnet".into(),
                 rules: vec!["be safe".into()],
+                include_session_context: false,
             },
         };
         config.save(&path).unwrap();
