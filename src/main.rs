@@ -12,7 +12,7 @@ mod update;
 mod watch;
 
 use clap::Parser;
-use cli::{Cli, Commands, PendingCommands, PolicyCommands, SessionsCommands};
+use cli::{Cli, Commands, ConfigCommands, PendingCommands, PolicyCommands, SessionsCommands};
 use config::Config;
 
 fn main() {
@@ -794,6 +794,150 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     );
                     for entry in &entries {
                         audit::print_entry(entry, false, &session_names, verbose);
+                    }
+                }
+            }
+        }
+
+        Commands::Config { command } => {
+            let cwd = std::env::current_dir()?;
+            match command {
+                ConfigCommands::Show => {
+                    let defaults = Config::default();
+                    let user_cfg = config::load_file(&config::user_config_path());
+                    let project_path = config::project_config_path(&cwd);
+                    let project_cfg = config::load_file(&project_path);
+                    let merged = Config::load(&cwd);
+                    let project_exists = project_path.exists();
+
+                    // Determine source for scalar settings
+                    let timeout_source =
+                        if project_exists && project_cfg.timeout != defaults.timeout {
+                            "project"
+                        } else if user_cfg.timeout != defaults.timeout {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    let poll_source =
+                        if project_exists && project_cfg.poll_interval != defaults.poll_interval {
+                            "project"
+                        } else if user_cfg.poll_interval != defaults.poll_interval {
+                            "user"
+                        } else {
+                            "default"
+                        };
+
+                    println!(
+                        "timeout:                    {} ({timeout_source})",
+                        merged.timeout
+                    );
+                    println!(
+                        "poll_interval:              {} ({poll_source})",
+                        merged.poll_interval
+                    );
+
+                    // Supervisor section
+                    let sv_enabled_source =
+                        if project_exists && project_cfg.supervisor.enabled {
+                            "project"
+                        } else if user_cfg.supervisor.enabled {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    let sv_model_source = if project_exists
+                        && !project_cfg.supervisor.model.is_empty()
+                        && project_cfg.supervisor.model != defaults.supervisor.model
+                    {
+                        "project"
+                    } else if user_cfg.supervisor.model != defaults.supervisor.model {
+                        "user"
+                    } else {
+                        "default"
+                    };
+                    let sv_context_source =
+                        if project_exists && project_cfg.supervisor.include_session_context {
+                            "project"
+                        } else if user_cfg.supervisor.include_session_context {
+                            "user"
+                        } else {
+                            "default"
+                        };
+
+                    println!();
+                    println!("Supervisor:");
+                    println!(
+                        "  enabled:                  {} ({sv_enabled_source})",
+                        merged.supervisor.enabled
+                    );
+                    println!(
+                        "  model:                    {} ({sv_model_source})",
+                        merged.supervisor.model
+                    );
+                    println!(
+                        "  include_session_context:   {} ({sv_context_source})",
+                        merged.supervisor.include_session_context
+                    );
+                    if merged.supervisor.rules.is_empty() {
+                        println!("  rules:                    (none)");
+                    } else {
+                        println!("  rules:");
+                        // Show project rules first, then user rules
+                        for rule in &project_cfg.supervisor.rules {
+                            println!("    [project] {rule}");
+                        }
+                        for rule in &user_cfg.supervisor.rules {
+                            println!("    [user]    {rule}");
+                        }
+                    }
+
+                    // Policies
+                    println!();
+                    if merged.policies.is_empty() {
+                        println!("Policies: (none)");
+                    } else {
+                        println!("Policies (evaluation order):");
+                        let project_policy_count = if project_exists {
+                            project_cfg.policies.len()
+                        } else {
+                            0
+                        };
+                        for (i, p) in merged.policies.iter().enumerate() {
+                            let source = if i < project_policy_count {
+                                "project"
+                            } else {
+                                "user"
+                            };
+                            let pattern_str = p
+                                .pattern
+                                .as_ref()
+                                .map(|pat| format!(" (pattern: {pat})"))
+                                .unwrap_or_default();
+                            println!(
+                                "  [{source}] {tool} -> {action}{pattern_str}",
+                                tool = p.tool,
+                                action = p.action,
+                            );
+                        }
+                    }
+
+                    // Config file paths
+                    let user_path = config::user_config_path();
+                    let home = std::env::var("HOME").unwrap_or_default();
+                    let user_display = user_path
+                        .to_string_lossy()
+                        .replace(&home, "~");
+                    println!();
+                    println!("Config files:");
+                    println!("  User:    {user_display}");
+                    if project_exists {
+                        println!("  Project: {}", project_path.display());
+                    } else {
+                        println!(
+                            "  Project: {} (not found)",
+                            project_path.display()
+                        );
                     }
                 }
             }
