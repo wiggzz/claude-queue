@@ -1,9 +1,46 @@
 # cq Backlog
 
-## Supervisor: support non-Claude models
-**Priority:** Low — future extensibility
+## Approval TUI / UI
+**Priority:** High — UX
 
-Currently the supervisor calls `claude -p`. To support other models/providers, abstract the LLM call behind a trait or config option (e.g. `provider: "anthropic"` vs `provider: "openai"`). Could also support a direct API mode using curl/HTTP client for lower latency.
+Interactive approval interface that follows pending tool calls and lets the user approve/deny inline.
+
+Options (in order of complexity):
+1. **CLI TUI** — `cq approve --interactive` or `cq tui`. Streams pending calls as they arrive, shows the supervisor summary, user hits enter to approve or `d` to deny. Minimal deps (crossterm or similar).
+2. **Native macOS UI** — SwiftUI menu bar app or floating window. Shows pending calls with approve/deny buttons, notifications on escalation. Much nicer UX than terminal — could show rich diffs, file context, etc.
+
+Either way the core loop is: poll `cq pending --json`, present, write back `cq approve`/`cq deny`.
+
+## Live agent activity stream
+**Priority:** High — observability
+
+Real-time unified stream of what all agents are doing — reasoning, tool calls, outputs — across all active sessions. Think `cq watch` but with full activity detail, not just status.
+
+Possible approaches:
+- Tap into Claude Code's streaming output per session (the raw JSONL logs in `~/.claude/projects/`)
+- `cq stream [--session NAME]` that tails all (or one) agent's activity
+- Unified feed: interleave events from all agents with session labels, color-coded
+- Could feed into the TUI as a split pane (approvals on one side, activity on the other)
+
+## PR checks integration
+**Priority:** Medium — workflow
+
+Automatically run checks on PRs using cq-managed agents. E.g. `cq pr-check 123` spins up agents to review code, run tests, check for regressions, and post results as PR comments. Could integrate with GitHub Actions or run locally. The orchestrator pattern is already there — this is just a pre-built workflow on top of it.
+
+## Multi-agent backend support
+**Priority:** Medium — extensibility
+
+Extract "Claude Code" as one agent backend behind a trait/interface. Support other coding agents:
+- **Codex** (OpenAI) — if it exposes a hook or approval mechanism
+- **opencode** — similar, need to investigate their extension points
+- **Direct API mode** — bypass CLI, call Claude API directly for lower latency supervisor calls
+
+The abstraction: an agent backend needs to support `start(prompt, cwd) -> session`, `resume(session, prompt)`, `kill(session)`, and a hook mechanism for intercepting tool calls. Each backend implements this differently.
+
+## Supervisor: direct API mode
+**Priority:** Low — performance
+
+Currently the supervisor calls `claude -p` which has CLI startup overhead on every tool call. Call the Claude API directly via HTTP for lower latency. Could use the Anthropic SDK or raw curl.
 
 ## Derive policies from Claude Code permissions
 **Priority:** High — zero-config UX
