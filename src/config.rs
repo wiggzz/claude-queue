@@ -446,8 +446,7 @@ mod tests {
 
     #[test]
     fn test_parse_claude_code_permission_path_pattern() {
-        let p =
-            parse_claude_code_permission("Read(//Users/wtj/src/**)", "allow").unwrap();
+        let p = parse_claude_code_permission("Read(//Users/wtj/src/**)", "allow").unwrap();
         assert_eq!(p.tool, "Read");
         assert_eq!(p.action, "allow");
         let pat = p.pattern.unwrap();
@@ -492,11 +491,7 @@ mod tests {
             }
         });
         let settings_path = dir.path().join("settings.json");
-        fs::write(
-            &settings_path,
-            serde_json::to_string(&settings).unwrap(),
-        )
-        .unwrap();
+        fs::write(&settings_path, serde_json::to_string(&settings).unwrap()).unwrap();
 
         let policies = derive_policies_from_settings_files(&[settings_path]);
         assert_eq!(policies.len(), 3);
