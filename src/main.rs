@@ -72,8 +72,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map(|s| {
                     let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
                     let resolved_status = if s.status == "running" && !alive {
-                        let resolved =
-                            session::resolve_dead_session(&db, &s.session_id);
+                        let resolved = session::resolve_dead_session(&db, &s.session_id);
                         if resolved == "completed" {
                             "completed"
                         } else {
@@ -87,7 +86,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .filter(|(_s, resolved_status)| {
                     status
                         .as_ref()
-                        .map_or(true, |f| resolved_status.eq_ignore_ascii_case(f))
+                        .is_none_or(|f| resolved_status.eq_ignore_ascii_case(f))
                 })
                 .collect();
             if rows.is_empty() {
