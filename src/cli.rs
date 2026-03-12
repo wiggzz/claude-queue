@@ -75,7 +75,7 @@ pub enum Commands {
         /// Filter by session name (contains match) or session ID (prefix match)
         #[arg(long)]
         session: Option<String>,
-        /// Filter by status (e.g. running, completed, failed, killed)
+        /// Filter by status (e.g. running, completed, failed, killed). Case-insensitive.
         #[arg(long)]
         status: Option<String>,
     },

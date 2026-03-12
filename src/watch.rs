@@ -1,7 +1,6 @@
 use crate::config;
 use crate::db::Db;
 use crate::format;
-use crate::session;
 use std::io::Write;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,6 +12,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::io::stdout().flush()?;
 
         let db = Db::open(&db_path)?;
+        // Proactively resolve dead sessions each refresh cycle
+        crate::session::resolve_running_sessions(&db);
 
         // Sessions
         let sessions = db.get_sessions()?;
@@ -25,12 +26,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "ID", "STATUS", "PID", "STARTED"
             );
             for s in &sessions {
-                let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
-                let status_display = if s.status == "running" && !alive {
-                    "dead?"
-                } else {
-                    &s.status
-                };
+                let status_display = &s.status;
                 let prompt_short = if s.prompt.len() > 50 {
                     format!("{}...", &s.prompt[..47])
                 } else {

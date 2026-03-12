@@ -173,39 +173,51 @@ fn launch(
         pid,
     )?;
 
-    // Spawn a thread to wait for completion and update DB
+    // Spawn a thread to wait for completion and update DB.
+    // Wrapped in catch_unwind so panics don't silently lose status updates.
     let sid = session_id.to_string();
     let dbp = db_path.clone();
     let cwd_for_thread = cwd_abs.to_string_lossy().to_string();
     std::thread::spawn(move || {
-        let mut child = child;
-        let status = child.wait();
-        if let Ok(db) = Db::open(&dbp) {
-            match status {
-                Ok(s) => {
-                    let code = s.code();
-                    let st = if code == Some(0) {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
-                    let _ = db.update_session_status(&sid, st, code);
-                }
-                Err(_) => {
-                    let _ = db.update_session_status(&sid, "failed", None);
-                }
-            }
-
-            // Check for a queued prompt and auto-resume if present
-            if let Ok(Some(sess)) = db.find_session(&sid) {
-                if let Some(ref session_name) = sess.name {
-                    if let Ok(Some(queued)) = db.get_queued_prompt(session_name) {
-                        let _ = db.clear_queued_prompt(session_name);
-                        // Use the claude_session_id from the completed session for continuity
-                        let claude_sid = sess.claude_session_id.as_deref().unwrap_or(&sid);
-                        let _ = resume_internal(claude_sid, session_name, &queued, &cwd_for_thread, &dbp);
+        let sid_clone = sid.clone();
+        let dbp_clone = dbp.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let mut child = child;
+            let status = child.wait();
+            let dbp_inner = dbp.clone();
+            if let Ok(db) = Db::open(&dbp) {
+                match status {
+                    Ok(s) => {
+                        let code = s.code();
+                        let st = if code == Some(0) {
+                            "completed"
+                        } else {
+                            "failed"
+                        };
+                        let _ = db.update_session_status(&sid, st, code);
+                    }
+                    Err(_) => {
+                        let _ = db.update_session_status(&sid, "failed", None);
                     }
                 }
+
+                // Check for a queued prompt and auto-resume if present
+                if let Ok(Some(sess)) = db.find_session(&sid) {
+                    if let Some(ref session_name) = sess.name {
+                        if let Ok(Some(queued)) = db.get_queued_prompt(session_name) {
+                            let _ = db.clear_queued_prompt(session_name);
+                            // Use the claude_session_id from the completed session for continuity
+                            let claude_sid = sess.claude_session_id.as_deref().unwrap_or(&sid);
+                            let _ = resume_internal(claude_sid, session_name, &queued, &cwd_for_thread, &dbp_inner);
+                        }
+                    }
+                }
+            }
+        }));
+        // If the thread panicked, still try to mark the session as failed
+        if result.is_err() {
+            if let Ok(db) = Db::open(&dbp_clone) {
+                let _ = db.update_session_status(&sid_clone, "failed", None);
             }
         }
     });
@@ -309,6 +321,20 @@ pub fn resolve_project_root(cwd: &Path) -> std::path::PathBuf {
 
     // Not a git repo — use cwd
     cwd.to_path_buf()
+}
+
+/// Scan all "running" sessions, check if their process is alive, and resolve dead ones.
+pub fn resolve_running_sessions(db: &Db) {
+    if let Ok(sessions) = db.get_sessions() {
+        for s in sessions {
+            if s.status == "running" {
+                let alive = s.pid.map(is_pid_alive).unwrap_or(false);
+                if !alive {
+                    resolve_dead_session(db, &s.session_id);
+                }
+            }
+        }
+    }
 }
 
 pub fn is_pid_alive(pid: i64) -> bool {

@@ -117,6 +117,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::List { session, status } => {
             let db = open_db()?;
+            // Proactively resolve any dead "running" sessions before listing
+            session::resolve_running_sessions(&db);
+            // Re-fetch sessions after resolving so statuses are up-to-date
             let mut sessions = db.get_sessions()?;
             if let Some(ref filter) = session {
                 sessions.retain(|s| {
@@ -126,31 +129,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         || s.session_id.starts_with(filter.as_str())
                 });
             }
-            // Resolve true status for each session, then apply status filter
-            let rows: Vec<_> = sessions
-                .iter()
-                .map(|s| {
-                    let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
-                    let resolved_status = if s.status == "running" && !alive {
-                        let resolved =
-                            session::resolve_dead_session(&db, &s.session_id);
-                        if resolved == "completed" {
-                            "completed"
-                        } else {
-                            "failed"
-                        }
-                    } else {
-                        &s.status
-                    };
-                    (s, resolved_status)
-                })
-                .filter(|(_s, resolved_status)| {
-                    status
-                        .as_ref()
-                        .map_or(true, |f| resolved_status.eq_ignore_ascii_case(f))
-                })
-                .collect();
-            if rows.is_empty() {
+            // Filter by status if requested (after resolving dead sessions above)
+            if let Some(ref status_filter) = status {
+                let filter_lower = status_filter.to_lowercase();
+                sessions.retain(|s| s.status.to_lowercase() == filter_lower);
+            }
+            if sessions.is_empty() {
                 println!("No sessions.");
                 return Ok(());
             }
@@ -158,7 +142,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 "{:<14} {:<18} {:<20} PROMPT",
                 "NAME/ID", "STATUS", "STARTED"
             );
-            for (s, resolved_status) in &rows {
+            for s in &sessions {
                 let id_display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
                 let prompt_short = if s.prompt.len() > 50 {
                     format!("{}...", &s.prompt[..47])
@@ -166,9 +150,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     s.prompt.clone()
                 };
                 let status_display = if s.queued_prompt.is_some() {
-                    format!("{} (queued)", resolved_status)
+                    format!("{} (queued)", s.status)
                 } else {
-                    resolved_status.to_string()
+                    s.status.clone()
                 };
                 println!(
                     "{:<14} {:<18} {:<20} {}",
@@ -185,6 +169,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             command,
         } => {
             let db = open_db()?;
+            // Proactively resolve dead sessions so pending calls from dead sessions are cleaned up
+            session::resolve_running_sessions(&db);
 
             match command {
                 Some(PendingCommands::Show { id }) => {
