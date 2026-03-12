@@ -5,6 +5,13 @@
 
 Currently the supervisor calls `claude -p`. To support other models/providers, abstract the LLM call behind a trait or config option (e.g. `provider: "anthropic"` vs `provider: "openai"`). Could also support a direct API mode using curl/HTTP client for lower latency.
 
+## Derive policies from Claude Code permissions
+**Priority:** High — zero-config UX
+
+cq should work well OOTB without any `.cq/config.json`. Instead of maintaining a separate policy config, read the user's existing Claude Code permission settings (`.claude/settings.json`, `~/.claude/settings.json`) to derive tool-call policies automatically. If Claude Code already trusts `Edit` and `Bash`, cq should too. This eliminates the need for users to configure permissions twice and makes cq a drop-in addition to any Claude Code workflow.
+
+Fallback: if no Claude Code settings are found, use the current default policies (read-only tools auto-allowed, everything else goes to supervisor).
+
 ## Config: resolve project root from worktrees
 **Priority:** High — UX
 

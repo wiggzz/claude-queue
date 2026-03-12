@@ -1,0 +1,19 @@
+{
+  "supervisor": {
+    "rules": [
+      "This is a Rust CLI project. APPROVE build/test/dev commands and local git operations.",
+      "ESCALATE git push, network requests, and destructive operations."
+    ]
+  },
+  "policies": [
+    {"tool": "Read", "action": "allow"},
+    {"tool": "Glob", "action": "allow"},
+    {"tool": "Grep", "action": "allow"},
+    {"tool": "LSP", "action": "allow"},
+    {"tool": "Edit", "action": "allow"},
+    {"tool": "Write", "action": "allow"},
+    {"tool": "Bash", "action": "allow", "pattern": "^(cargo |rustc |git (add|commit|status|diff|log|show|branch|checkout|stash|rev-parse))"},
+    {"tool": "Bash", "action": "allow", "pattern": "^(ls|cat |head |tail |wc |grep |find |rg |fd |tree |pwd|which |echo )"},
+    {"tool": "Bash", "action": "allow", "pattern": "^gh (run |repo view)"}
+  ]
+}

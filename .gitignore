@@ -1,3 +1,4 @@
 /target
-.cq/
+.cq/*
+!.cq/config.json
 .DS_Store

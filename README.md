@@ -7,7 +7,13 @@ Orchestrate multiple Claude Code sessions from a single place.
 
 ## Install
 
+```sh
+curl -fsSL https://raw.githubusercontent.com/wiggzz/claude-queue/main/install.sh | sh
 ```
+
+Or build from source:
+
+```sh
 cargo install --path .
 ```
 
