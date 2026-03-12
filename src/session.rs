@@ -1,6 +1,7 @@
 use crate::config;
 use crate::db::Db;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 /// Start a brand new sub-agent session.
@@ -76,6 +77,7 @@ fn launch(
     extra_args: Vec<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let cwd_abs = fs::canonicalize(cwd)?;
+    let project_root = resolve_project_root(&cwd_abs);
     let db_path = config::db_path();
     let log_dir = config::log_dir();
     fs::create_dir_all(&log_dir)?;
@@ -116,6 +118,7 @@ fn launch(
         ])
         .env("CQ_MANAGED", "1")
         .env("CQ_DB", db_path.to_string_lossy().as_ref())
+        .env("CQ_PROJECT_DIR", project_root.to_string_lossy().as_ref())
         .env("CQ_SESSION_CWD", cwd_abs.to_string_lossy().as_ref())
         .env("CQ_SESSION_NAME", name.unwrap_or(""))
         .env("CQ_SESSION_PROMPT", prompt_display)
@@ -218,6 +221,43 @@ pub fn kill_session(pid: i64) -> Result<(), Box<dyn std::error::Error>> {
         Command::new("kill").arg(pid.to_string()).status()?;
     }
     Ok(())
+}
+
+/// Resolve the project root directory, handling git worktrees.
+/// For worktrees, returns the main repository's root (where .cq/config.json lives).
+/// Falls back to `git rev-parse --show-toplevel`, then to the given cwd.
+pub fn resolve_project_root(cwd: &Path) -> std::path::PathBuf {
+    // Try git --git-common-dir to find the shared .git directory.
+    // For worktrees this points to the main repo's .git dir.
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(cwd)
+        .output()
+        && output.status.success()
+    {
+        let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let common_path = std::path::Path::new(&common_dir);
+        // The common git dir is <repo>/.git — parent is the project root
+        if let Some(root) = common_path.parent() {
+            return root.to_path_buf();
+        }
+    }
+
+    // Fallback: git toplevel
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        && output.status.success()
+    {
+        let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !toplevel.is_empty() {
+            return std::path::PathBuf::from(toplevel);
+        }
+    }
+
+    // Not a git repo — use cwd
+    cwd.to_path_buf()
 }
 
 pub fn is_pid_alive(pid: i64) -> bool {
