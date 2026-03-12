@@ -31,7 +31,7 @@ pub fn resume(id_or_prefix: &str, prompt: &str, cwd: &str) -> Result<String, Box
     let cq_session_id = uuid::Uuid::new_v4().to_string();
     let args = vec![
         "-p".to_string(),
-        "-r".to_string(), claude_sid.clone(),
+        "--session-id".to_string(), claude_sid.clone(),
         prompt.to_string(),
     ];
     // Inherit the name from the original session if it had one
