@@ -177,6 +177,15 @@ pub enum Commands {
         #[arg(long, short)]
         verbose: bool,
     },
+    /// Clean up expired sessions and old data: cq gc [--older-than 7d] [--dry-run]
+    Gc {
+        /// Remove sessions older than this duration (e.g. "7d", "24h", "30d"). Default: 7d
+        #[arg(long, default_value = "7d")]
+        older_than: String,
+        /// Only show what would be cleaned up, don't actually delete
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Update cq to the latest release from GitHub
     Update,
     /// Print the current version
