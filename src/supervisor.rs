@@ -20,13 +20,17 @@ Default guidelines:
 pub enum Decision {
     Approve(String),
     Deny(String),
-    Escalate(String),
+    Escalate {
+        reason: String,
+        summary: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
 struct LlmResponse {
     decision: String,
     reason: String,
+    summary: Option<String>,
 }
 
 pub(crate) fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) -> String {
@@ -64,7 +68,10 @@ pub(crate) fn build_prompt(rules: &[String], tool_name: &str, tool_input: &str) 
     ));
 
     prompt.push_str(
-        "\nRespond with JSON only: {\"decision\": \"approve|deny|escalate\", \"reason\": \"brief explanation\"}"
+        "\nRespond with JSON only: {\"decision\": \"approve|deny|escalate\", \"reason\": \"brief explanation\"}\n\
+        If you choose \"escalate\", also include a \"summary\" field: a single plain-English sentence \
+        describing what the tool call does from a neutral perspective (e.g. \"Pushes current branch to origin/main\"). \
+        This summary will be shown to the human operator for approval."
     );
 
     prompt
@@ -95,9 +102,10 @@ pub fn evaluate(
     let output = match output {
         Ok(o) => o,
         Err(e) => {
-            return Ok(Decision::Escalate(format!(
-                "Failed to invoke supervisor: {e}"
-            )));
+            return Ok(Decision::Escalate {
+                reason: format!("Failed to invoke supervisor: {e}"),
+                summary: None,
+            });
         }
     };
 
@@ -109,10 +117,13 @@ pub fn evaluate(
             .code()
             .map(|c| c.to_string())
             .unwrap_or("signal".into());
-        return Ok(Decision::Escalate(format!(
-            "Supervisor process failed (exit {code}): stderr={stderr} stdout={}",
-            &stdout[..stdout.len().min(1000)]
-        )));
+        return Ok(Decision::Escalate {
+            reason: format!(
+                "Supervisor process failed (exit {code}): stderr={stderr} stdout={}",
+                &stdout[..stdout.len().min(1000)]
+            ),
+            summary: None,
+        });
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -123,16 +134,20 @@ pub fn evaluate(
     let parsed: LlmResponse = match serde_json::from_str(&response_text) {
         Ok(r) => r,
         Err(_) => {
-            return Ok(Decision::Escalate(format!(
-                "Failed to parse supervisor response: {response_text}"
-            )));
+            return Ok(Decision::Escalate {
+                reason: format!("Failed to parse supervisor response: {response_text}"),
+                summary: None,
+            });
         }
     };
 
     match parsed.decision.to_lowercase().as_str() {
         "approve" => Ok(Decision::Approve(parsed.reason)),
         "deny" => Ok(Decision::Deny(parsed.reason)),
-        _ => Ok(Decision::Escalate(parsed.reason)),
+        _ => Ok(Decision::Escalate {
+            reason: parsed.reason,
+            summary: parsed.summary,
+        }),
     }
 }
 

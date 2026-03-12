@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(
     name = "cq",
+    version,
     about = "Claude Queue — orchestrate multiple Claude Code sub-agent sessions",
     long_about = "\
 Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
@@ -84,9 +85,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<PendingCommands>,
     },
-    /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>] [--tool <name>] [--match <regex>]
+    /// Approve a pending tool call: cq approve <id|summary|all> [--session <name>] [--tool <name>] [--match <regex>]
     Approve {
-        /// Tool call ID (number) or "all" to approve everything pending
+        /// Tool call ID (number), escalation summary (text), or "all" to approve everything pending
         id: String,
         /// Only approve tool calls for this session (name or ID prefix)
         #[arg(long)]
@@ -170,6 +171,8 @@ pub enum Commands {
         #[arg(long, short)]
         follow: bool,
     },
+    /// Update cq to the latest release from GitHub
+    Update,
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,

@@ -106,6 +106,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // No static policy match — try supervisor if enabled
+    let mut escalation_summary: Option<String> = None;
     if config.supervisor.enabled {
         match supervisor::evaluate(&config.supervisor, &tool_name, &tool_input_str) {
             Ok(supervisor::Decision::Approve(reason)) => {
@@ -134,8 +135,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     "Supervisor denied: {reason}"
                 ))));
             }
-            Ok(supervisor::Decision::Escalate(reason)) => {
+            Ok(supervisor::Decision::Escalate { reason, summary }) => {
                 eprintln!("[cq supervisor] escalated: {reason}");
+                if let Some(ref s) = summary {
+                    eprintln!("[cq supervisor] summary: {s}");
+                }
                 audit::log(
                     &session_id,
                     &tool_name,
@@ -144,6 +148,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     &reason,
                     "supervisor",
                 );
+                escalation_summary = summary;
                 // Fall through to human approval
             }
             Err(e) => {
@@ -156,7 +161,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // No auto-decision — register in DB and wait for approval
     let db_path = config::db_path();
     let db = Db::open(&db_path)?;
-    let tc_id = db.insert_tool_call(&session_id, &tool_name, &tool_input_str)?;
+    let tc_id = db.insert_tool_call_with_summary(
+        &session_id,
+        &tool_name,
+        &tool_input_str,
+        escalation_summary.as_deref(),
+    )?;
 
     // Poll for resolution
     let timeout = Duration::from_secs(config.timeout);

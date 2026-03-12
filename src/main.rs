@@ -8,6 +8,7 @@ mod hook;
 mod policy;
 mod session;
 mod supervisor;
+mod update;
 mod watch;
 
 use clap::Parser;
@@ -27,6 +28,10 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Update => {
+            update::run()?;
+        }
+
         Commands::Hook => {
             hook::run()?;
         }
@@ -108,6 +113,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     println!("Session:   {}", tc.session_id);
                     println!("Tool:      {}", tc.tool_name);
                     println!("Status:    {}", tc.status);
+                    if let Some(summary) = &tc.summary {
+                        println!("Summary:   {summary}");
+                    }
                     println!("Created:   {}", tc.created_at);
                     if let Some(resolved) = &tc.resolved_at {
                         println!("Resolved:  {resolved}");
@@ -131,43 +139,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 println!("{}", tool_call_to_json(tc));
                             }
                         } else if full {
-                            for (i, tc) in existing.iter().enumerate() {
-                                if i > 0 {
-                                    println!("{}", "-".repeat(60));
-                                }
-                                println!("ID:        {}", tc.id);
-                                println!(
-                                    "Session:   {}",
-                                    &tc.session_id[..8.min(tc.session_id.len())]
-                                );
-                                println!("Tool:      {}", tc.tool_name);
-                                println!("Since:     {}", tc.created_at);
-                                println!("\nInput:");
-                                match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
-                                    Ok(val) => {
-                                        println!("{}", serde_json::to_string_pretty(&val).unwrap())
-                                    }
-                                    Err(_) => println!("{}", tc.tool_input),
-                                }
-                                println!();
-                            }
+                            print_pending_full(&existing);
                         } else {
-                            println!(
-                                "{:<6} {:<10} {:<15} {:<20} INPUT",
-                                "ID", "SESSION", "TOOL", "SINCE"
-                            );
-                            for tc in &existing {
-                                let input_short =
-                                    format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
-                                println!(
-                                    "{:<6} {:<10} {:<15} {:<20} {}",
-                                    tc.id,
-                                    &tc.session_id[..8.min(tc.session_id.len())],
-                                    tc.tool_name,
-                                    &tc.created_at,
-                                    input_short,
-                                );
-                            }
+                            print_pending_table(&existing);
                         }
                         return Ok(());
                     }
@@ -189,25 +163,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                     println!("{}", tool_call_to_json(tc));
                                 }
                             } else {
-                                println!(
-                                    "{:<6} {:<10} {:<15} {:<20} INPUT",
-                                    "ID", "SESSION", "TOOL", "SINCE"
-                                );
-                                for tc in &new_calls {
-                                    let input_short = format::format_tool_input(
-                                        &tc.tool_name,
-                                        &tc.tool_input,
-                                        60,
-                                    );
-                                    println!(
-                                        "{:<6} {:<10} {:<15} {:<20} {}",
-                                        tc.id,
-                                        &tc.session_id[..8.min(tc.session_id.len())],
-                                        tc.tool_name,
-                                        &tc.created_at,
-                                        input_short,
-                                    );
-                                }
+                                print_pending_table(&new_calls);
                             }
                             return Ok(());
                         }
@@ -231,43 +187,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             println!("{}", tool_call_to_json(tc));
                         }
                     } else if full {
-                        for (i, tc) in pending.iter().enumerate() {
-                            if i > 0 {
-                                println!("{}", "-".repeat(60));
-                            }
-                            println!("ID:        {}", tc.id);
-                            println!(
-                                "Session:   {}",
-                                &tc.session_id[..8.min(tc.session_id.len())]
-                            );
-                            println!("Tool:      {}", tc.tool_name);
-                            println!("Since:     {}", tc.created_at);
-                            println!("\nInput:");
-                            match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
-                                Ok(val) => {
-                                    println!("{}", serde_json::to_string_pretty(&val).unwrap())
-                                }
-                                Err(_) => println!("{}", tc.tool_input),
-                            }
-                            println!();
-                        }
+                        print_pending_full(&pending);
                     } else {
-                        println!(
-                            "{:<6} {:<10} {:<15} {:<20} INPUT",
-                            "ID", "SESSION", "TOOL", "SINCE"
-                        );
-                        for tc in &pending {
-                            let input_short =
-                                format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
-                            println!(
-                                "{:<6} {:<10} {:<15} {:<20} {}",
-                                tc.id,
-                                &tc.session_id[..8.min(tc.session_id.len())],
-                                tc.tool_name,
-                                &tc.created_at,
-                                input_short,
-                            );
-                        }
+                        print_pending_table(&pending);
                     }
                 }
             }
@@ -423,24 +345,69 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             .into(),
                     );
                 }
-                let id: i64 = id
-                    .parse()
-                    .map_err(|_| "Invalid ID. Use a number or 'all'.")?;
-                let tc = db.get_tool_call_by_id(id)?;
-                if db.resolve_tool_call(id, "approved", None)? {
-                    if let Some(tc) = tc {
-                        audit::log(
-                            &tc.session_id,
-                            &tc.tool_name,
-                            &tc.tool_input,
-                            "approve",
-                            "Manual approve",
-                            "human",
-                        );
+                // Try numeric ID first
+                if let Ok(numeric_id) = id.parse::<i64>() {
+                    let tc = db.get_tool_call_by_id(numeric_id)?;
+                    if db.resolve_tool_call(numeric_id, "approved", None)? {
+                        if let Some(tc) = tc {
+                            audit::log(
+                                &tc.session_id,
+                                &tc.tool_name,
+                                &tc.tool_input,
+                                "approve",
+                                "Manual approve",
+                                "human",
+                            );
+                        }
+                        println!("Approved tool call {numeric_id}.");
+                    } else {
+                        eprintln!("Tool call {numeric_id} not found or not pending.");
                     }
-                    println!("Approved tool call {id}.");
                 } else {
-                    eprintln!("Tool call {id} not found or not pending.");
+                    // Not a number — try summary match
+                    let matches = db.find_pending_by_summary(&id)?;
+                    match matches.len() {
+                        0 => {
+                            eprintln!("No pending tool call found matching summary \"{id}\".");
+                            std::process::exit(1);
+                        }
+                        1 => {
+                            let tc = &matches[0];
+                            if db.resolve_tool_call(tc.id, "approved", None)? {
+                                audit::log(
+                                    &tc.session_id,
+                                    &tc.tool_name,
+                                    &tc.tool_input,
+                                    "approve",
+                                    &format!(
+                                        "Approved by summary: {}",
+                                        tc.summary.as_deref().unwrap_or(&id)
+                                    ),
+                                    "human",
+                                );
+                                println!(
+                                    "Approved tool call {} ({}).",
+                                    tc.id,
+                                    tc.summary.as_deref().unwrap_or("")
+                                );
+                            } else {
+                                eprintln!("Tool call {} is no longer pending.", tc.id);
+                            }
+                        }
+                        n => {
+                            eprintln!("Multiple pending tool calls ({n}) match \"{id}\":");
+                            for tc in &matches {
+                                eprintln!(
+                                    "  [{}] {} — {}",
+                                    tc.id,
+                                    tc.tool_name,
+                                    tc.summary.as_deref().unwrap_or("(no summary)")
+                                );
+                            }
+                            eprintln!("Be more specific, or use the numeric ID.");
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }
@@ -844,15 +811,68 @@ fn open_db() -> Result<db::Db, Box<dyn std::error::Error>> {
     Ok(db::Db::open(&config::db_path())?)
 }
 
+fn print_pending_full(calls: &[db::ToolCall]) {
+    for (i, tc) in calls.iter().enumerate() {
+        if i > 0 {
+            println!("{}", "-".repeat(60));
+        }
+        println!("ID:        {}", tc.id);
+        println!(
+            "Session:   {}",
+            &tc.session_id[..8.min(tc.session_id.len())]
+        );
+        println!("Tool:      {}", tc.tool_name);
+        if let Some(ref summary) = tc.summary {
+            println!("Summary:   {summary}");
+        }
+        println!("Since:     {}", tc.created_at);
+        println!("\nInput:");
+        match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
+            Ok(val) => println!("{}", serde_json::to_string_pretty(&val).unwrap()),
+            Err(_) => println!("{}", tc.tool_input),
+        }
+        println!();
+    }
+}
+
+fn print_pending_table(calls: &[db::ToolCall]) {
+    println!(
+        "{:<6} {:<10} {:<15} {:<20} DESCRIPTION",
+        "ID", "SESSION", "TOOL", "SINCE"
+    );
+    for tc in calls {
+        let description = if let Some(ref summary) = tc.summary {
+            format!("\"{}\"", truncate_str(summary, 58))
+        } else {
+            format::format_tool_input(&tc.tool_name, &tc.tool_input, 60)
+        };
+        println!(
+            "{:<6} {:<10} {:<15} {:<20} {}",
+            tc.id,
+            &tc.session_id[..8.min(tc.session_id.len())],
+            tc.tool_name,
+            &tc.created_at,
+            description,
+        );
+    }
+}
+
+fn truncate_str(s: &str, max: usize) -> &str {
+    if s.len() <= max { s } else { &s[..max] }
+}
+
 fn tool_call_to_json(tc: &db::ToolCall) -> String {
     let tool_input = serde_json::from_str::<serde_json::Value>(&tc.tool_input)
         .unwrap_or_else(|_| serde_json::Value::String(tc.tool_input.clone()));
-    let obj = serde_json::json!({
+    let mut obj = serde_json::json!({
         "id": tc.id,
         "session_id": tc.session_id,
         "tool_name": tc.tool_name,
         "tool_input": tool_input,
         "created_at": tc.created_at,
     });
+    if let Some(ref summary) = tc.summary {
+        obj["summary"] = serde_json::Value::String(summary.clone());
+    }
     serde_json::to_string(&obj).unwrap()
 }

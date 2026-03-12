@@ -28,6 +28,7 @@ pub struct ToolCall {
     pub tool_input: String,
     pub status: String,
     pub reason: Option<String>,
+    pub summary: Option<String>,
     pub created_at: String,
     pub resolved_at: Option<String>,
 }
@@ -98,6 +99,7 @@ impl Db {
         // Migrations for existing DBs
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
+        let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
         Ok(Db { conn })
     }
 
@@ -171,15 +173,26 @@ impl Db {
 
     // --- Tool Calls ---
 
+    #[allow(dead_code)]
     pub fn insert_tool_call(
         &self,
         session_id: &str,
         tool_name: &str,
         tool_input: &str,
     ) -> rusqlite::Result<i64> {
+        self.insert_tool_call_with_summary(session_id, tool_name, tool_input, None)
+    }
+
+    pub fn insert_tool_call_with_summary(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+        summary: Option<&str>,
+    ) -> rusqlite::Result<i64> {
         self.conn.execute(
-            "INSERT INTO tool_calls (session_id, tool_name, tool_input) VALUES (?1, ?2, ?3)",
-            params![session_id, tool_name, tool_input],
+            "INSERT INTO tool_calls (session_id, tool_name, tool_input, summary) VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, tool_name, tool_input, summary],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -219,10 +232,10 @@ impl Db {
     ) -> rusqlite::Result<Vec<ToolCall>> {
         let sql = match session_filter {
             Some(_) => {
-                "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE status = 'pending' AND session_id LIKE ?1 || '%' ORDER BY id"
+                "SELECT id, session_id, tool_name, tool_input, status, reason, summary, created_at, resolved_at FROM tool_calls WHERE status = 'pending' AND session_id LIKE ?1 || '%' ORDER BY id"
             }
             None => {
-                "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE status = 'pending' ORDER BY id"
+                "SELECT id, session_id, tool_name, tool_input, status, reason, summary, created_at, resolved_at FROM tool_calls WHERE status = 'pending' ORDER BY id"
             }
         };
         let mut stmt = self.conn.prepare(sql)?;
@@ -234,9 +247,17 @@ impl Db {
         rows.collect()
     }
 
+    pub fn find_pending_by_summary(&self, query: &str) -> rusqlite::Result<Vec<ToolCall>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, tool_name, tool_input, status, reason, summary, created_at, resolved_at FROM tool_calls WHERE status = 'pending' AND summary IS NOT NULL AND summary LIKE '%' || ?1 || '%'"
+        )?;
+        let rows = stmt.query_map(params![query], Self::map_tool_call)?;
+        rows.collect()
+    }
+
     pub fn get_tool_call_by_id(&self, id: i64) -> rusqlite::Result<Option<ToolCall>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE id = ?1"
+            "SELECT id, session_id, tool_name, tool_input, status, reason, summary, created_at, resolved_at FROM tool_calls WHERE id = ?1"
         )?;
         let mut rows = stmt.query_map(params![id], Self::map_tool_call)?;
         match rows.next() {
@@ -289,8 +310,9 @@ impl Db {
             tool_input: row.get(3)?,
             status: row.get(4)?,
             reason: row.get(5)?,
-            created_at: row.get(6)?,
-            resolved_at: row.get(7)?,
+            summary: row.get(6)?,
+            created_at: row.get(7)?,
+            resolved_at: row.get(8)?,
         })
     }
 }
@@ -450,5 +472,96 @@ mod tests {
         let pending = db.get_pending_tool_calls(None).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].tool_name, "Read");
+    }
+
+    #[test]
+    fn test_insert_tool_call_with_summary() {
+        let db = open_temp_db();
+        let id = db
+            .insert_tool_call_with_summary(
+                "s1",
+                "Bash",
+                r#"{"command":"git push"}"#,
+                Some("Pushes current branch to origin"),
+            )
+            .unwrap();
+        let tc = db.get_tool_call_by_id(id).unwrap().unwrap();
+        assert_eq!(
+            tc.summary.as_deref(),
+            Some("Pushes current branch to origin")
+        );
+        assert_eq!(tc.status, "pending");
+    }
+
+    #[test]
+    fn test_insert_tool_call_without_summary() {
+        let db = open_temp_db();
+        let id = db
+            .insert_tool_call_with_summary("s1", "Bash", "input", None)
+            .unwrap();
+        let tc = db.get_tool_call_by_id(id).unwrap().unwrap();
+        assert!(tc.summary.is_none());
+    }
+
+    #[test]
+    fn test_find_pending_by_summary_exact() {
+        let db = open_temp_db();
+        db.insert_tool_call_with_summary(
+            "s1",
+            "Bash",
+            "a",
+            Some("Pushes current branch to origin"),
+        )
+        .unwrap();
+        db.insert_tool_call_with_summary("s1", "Write", "b", Some("Writes config file"))
+            .unwrap();
+        db.insert_tool_call("s1", "Read", "c").unwrap(); // no summary
+
+        let results = db.find_pending_by_summary("Pushes current branch").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tool_name, "Bash");
+    }
+
+    #[test]
+    fn test_find_pending_by_summary_no_match() {
+        let db = open_temp_db();
+        db.insert_tool_call_with_summary("s1", "Bash", "a", Some("Pushes branch"))
+            .unwrap();
+        let results = db.find_pending_by_summary("Deletes everything").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_pending_by_summary_excludes_resolved() {
+        let db = open_temp_db();
+        let id = db
+            .insert_tool_call_with_summary("s1", "Bash", "a", Some("Pushes branch"))
+            .unwrap();
+        db.resolve_tool_call(id, "approved", None).unwrap();
+        let results = db.find_pending_by_summary("Pushes branch").unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_find_pending_by_summary_multiple_matches() {
+        let db = open_temp_db();
+        db.insert_tool_call_with_summary("s1", "Bash", "a", Some("Pushes branch to origin"))
+            .unwrap();
+        db.insert_tool_call_with_summary("s1", "Bash", "b", Some("Pushes branch to upstream"))
+            .unwrap();
+        let results = db.find_pending_by_summary("Pushes branch").unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_pending_tool_calls_include_summary() {
+        let db = open_temp_db();
+        db.insert_tool_call_with_summary("s1", "Bash", "a", Some("Does something"))
+            .unwrap();
+        db.insert_tool_call("s1", "Read", "b").unwrap();
+        let pending = db.get_pending_tool_calls(None).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].summary.as_deref(), Some("Does something"));
+        assert!(pending[1].summary.is_none());
     }
 }
