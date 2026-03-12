@@ -4,11 +4,16 @@ use std::fs;
 use std::process::Command;
 
 /// Start a brand new sub-agent session.
-pub fn start(prompt: &str, name: Option<&str>, cwd: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn start(
+    prompt: &str,
+    name: Option<&str>,
+    cwd: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let args = vec![
         "-p".to_string(),
-        "--session-id".to_string(), session_id.clone(),
+        "--session-id".to_string(),
+        session_id.clone(),
         prompt.to_string(),
     ];
     launch(&session_id, Some(&session_id), name, prompt, cwd, args)
@@ -16,7 +21,11 @@ pub fn start(prompt: &str, name: Option<&str>, cwd: &str) -> Result<String, Box<
 
 /// Resume a session. Accepts either a cq session ID prefix or a raw claude session ID.
 /// Looks up the claude_session_id from the DB if it's a cq prefix, otherwise uses it directly.
-pub fn resume(id_or_prefix: &str, prompt: &str, cwd: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub fn resume(
+    id_or_prefix: &str,
+    prompt: &str,
+    cwd: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let db = Db::open(&config::db_path())?;
 
     // Try to find by cq session prefix first, then by claude session ID
@@ -31,7 +40,8 @@ pub fn resume(id_or_prefix: &str, prompt: &str, cwd: &str) -> Result<String, Box
     let cq_session_id = uuid::Uuid::new_v4().to_string();
     let args = vec![
         "-p".to_string(),
-        "--session-id".to_string(), claude_sid.clone(),
+        "--session-id".to_string(),
+        claude_sid.clone(),
         prompt.to_string(),
     ];
     // Inherit the name from the original session if it had one
@@ -41,12 +51,30 @@ pub fn resume(id_or_prefix: &str, prompt: &str, cwd: &str) -> Result<String, Box
         None
     };
 
-    let display_prompt = format!("[resumed {}] {}", &claude_sid[..8.min(claude_sid.len())], prompt);
-    launch(&cq_session_id, Some(&claude_sid), name.as_deref(), &display_prompt, cwd, args)
+    let display_prompt = format!(
+        "[resumed {}] {}",
+        &claude_sid[..8.min(claude_sid.len())],
+        prompt
+    );
+    launch(
+        &cq_session_id,
+        Some(&claude_sid),
+        name.as_deref(),
+        &display_prompt,
+        cwd,
+        args,
+    )
 }
 
 /// Common launch logic for both start and resume.
-fn launch(session_id: &str, claude_session_id: Option<&str>, name: Option<&str>, prompt_display: &str, cwd: &str, extra_args: Vec<String>) -> Result<String, Box<dyn std::error::Error>> {
+fn launch(
+    session_id: &str,
+    claude_session_id: Option<&str>,
+    name: Option<&str>,
+    prompt_display: &str,
+    cwd: &str,
+    extra_args: Vec<String>,
+) -> Result<String, Box<dyn std::error::Error>> {
     let cwd_abs = fs::canonicalize(cwd)?;
     let db_path = config::db_path();
     let log_dir = config::log_dir();
@@ -58,8 +86,7 @@ fn launch(session_id: &str, claude_session_id: Option<&str>, name: Option<&str>,
     let stderr_file = fs::File::create(&stderr_path)?;
 
     // Build the hook settings JSON
-    let cq_bin = std::env::current_exe()
-        .unwrap_or_else(|_| "cq".into());
+    let cq_bin = std::env::current_exe().unwrap_or_else(|_| "cq".into());
     let hook_command = format!("{} hook", cq_bin.display());
     let settings = serde_json::json!({
         "hooks": {
@@ -81,8 +108,10 @@ fn launch(session_id: &str, claude_session_id: Option<&str>, name: Option<&str>,
     }
     let child = cmd
         .args([
-            "--settings", &settings_str,
-            "--permission-mode", "bypassPermissions",
+            "--settings",
+            &settings_str,
+            "--permission-mode",
+            "bypassPermissions",
             "--dangerously-skip-permissions",
         ])
         .env("CQ_MANAGED", "1")
@@ -100,7 +129,14 @@ fn launch(session_id: &str, claude_session_id: Option<&str>, name: Option<&str>,
 
     // Record in DB
     let db = Db::open(&db_path)?;
-    db.create_session(session_id, claude_session_id, name, prompt_display, &cwd_abs.to_string_lossy(), pid)?;
+    db.create_session(
+        session_id,
+        claude_session_id,
+        name,
+        prompt_display,
+        &cwd_abs.to_string_lossy(),
+        pid,
+    )?;
 
     // Spawn a thread to wait for completion and update DB
     let sid = session_id.to_string();
@@ -112,7 +148,11 @@ fn launch(session_id: &str, claude_session_id: Option<&str>, name: Option<&str>,
             match status {
                 Ok(s) => {
                     let code = s.code();
-                    let st = if code == Some(0) { "completed" } else { "failed" };
+                    let st = if code == Some(0) {
+                        "completed"
+                    } else {
+                        "failed"
+                    };
                     let _ = db.update_session_status(&sid, st, code);
                 }
                 Err(_) => {
@@ -132,10 +172,18 @@ pub fn resolve_dead_session(db: &crate::db::Db, session_id: &str) -> String {
     let status = if let Ok(content) = fs::read_to_string(&log_path) {
         if !content.trim().is_empty() {
             let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-            if stderr.contains("Error:") { "failed" } else { "completed" }
+            if stderr.contains("Error:") {
+                "failed"
+            } else {
+                "completed"
+            }
         } else {
             let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-            if stderr.trim().is_empty() { "completed" } else { "failed" }
+            if stderr.trim().is_empty() {
+                "completed"
+            } else {
+                "failed"
+            }
         }
     } else {
         "failed"

@@ -1,5 +1,8 @@
 use crate::config;
+use crate::db;
+use crate::format;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 
@@ -47,18 +50,17 @@ fn append_entry(entry: &AuditEntry) -> std::io::Result<()> {
     let log_dir = config::log_dir();
     fs::create_dir_all(&log_dir)?;
     let path = log_dir.join("audit.log");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    let line = serde_json::to_string(entry).map_err(|e| std::io::Error::other(e))?;
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let line = serde_json::to_string(entry).map_err(std::io::Error::other)?;
     writeln!(file, "{line}")
 }
 
 fn chrono_iso8601_now() -> String {
     // Use std::time to get UTC timestamp in ISO 8601 format
     let now = std::time::SystemTime::now();
-    let duration = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let duration = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = duration.as_secs();
 
     // Convert to date/time components
@@ -95,18 +97,19 @@ pub fn follow(tail: usize, json: bool) {
     use std::io::{Seek, SeekFrom};
 
     let path = config::log_dir().join("audit.log");
+    let session_names = load_session_names();
 
     // Print initial tail entries
     let entries = read_tail(tail);
     if !entries.is_empty() {
         if !json {
             println!(
-                "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
-                "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON"
+                "{:<22} {:<10} {:<10} {:<15} {:<10} REASON",
+                "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION"
             );
         }
         for entry in &entries {
-            print_entry(entry, json);
+            print_entry(entry, json, &session_names);
         }
     }
 
@@ -120,8 +123,8 @@ pub fn follow(tail: usize, json: bool) {
                 if let Ok(f) = fs::File::open(&path) {
                     if !json && entries.is_empty() {
                         println!(
-                            "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
-                            "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON"
+                            "{:<22} {:<10} {:<10} {:<15} {:<10} REASON",
+                            "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION"
                         );
                     }
                     break f;
@@ -155,31 +158,47 @@ pub fn follow(tail: usize, json: bool) {
             if let Ok(entry) = serde_json::from_str::<AuditEntry>(line) {
                 if !json && !header_printed {
                     println!(
-                        "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
-                        "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION", "REASON"
+                        "{:<22} {:<10} {:<10} {:<15} {:<10} REASON",
+                        "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION"
                     );
                     header_printed = true;
                 }
-                print_entry(&entry, json);
+                print_entry(&entry, json, &session_names);
             }
         }
     }
 }
 
-pub fn print_entry(entry: &AuditEntry, json: bool) {
+/// Load a session_id -> name map from the database. Returns an empty map on failure.
+pub fn load_session_names() -> HashMap<String, String> {
+    db::Db::open(&config::db_path())
+        .and_then(|db| db.get_session_names())
+        .unwrap_or_default()
+}
+
+/// Resolve a session_id to a display name: use the session name if available,
+/// otherwise truncate the session_id to 8 characters.
+fn session_display(session_id: &str, names: &HashMap<String, String>) -> String {
+    if let Some(name) = names.get(session_id) {
+        name.clone()
+    } else if session_id.len() > 8 {
+        session_id[..8].to_string()
+    } else {
+        session_id.to_string()
+    }
+}
+
+pub fn print_entry(entry: &AuditEntry, json: bool, session_names: &HashMap<String, String>) {
     if json {
         println!("{}", serde_json::to_string(entry).unwrap());
     } else {
-        let session_short = if entry.session_id.len() > 8 {
-            &entry.session_id[..8]
-        } else {
-            &entry.session_id
-        };
+        let session_short = session_display(&entry.session_id, session_names);
         let reason_short = if entry.reason.len() > 40 {
             format!("{}...", &entry.reason[..37])
         } else {
             entry.reason.clone()
         };
+        let tool_display = format::format_tool_input(&entry.tool_name, &entry.tool_input, 60);
         println!(
             "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
             &entry.timestamp,
@@ -189,6 +208,17 @@ pub fn print_entry(entry: &AuditEntry, json: bool) {
             session_short,
             reason_short,
         );
+        if tool_display != entry.tool_input {
+            // Tool input was formatted specially (Bash command, file path, etc.)
+            println!("  {tool_display}");
+        } else if !entry.tool_input.is_empty() {
+            let input_short = if entry.tool_input.len() > 80 {
+                format!("{}...", &entry.tool_input[..77])
+            } else {
+                entry.tool_input.clone()
+            };
+            println!("  {input_short}");
+        }
     }
 }
 

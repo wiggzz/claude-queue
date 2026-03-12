@@ -2,29 +2,48 @@
 /// Returns a formatted string like "[path/to/file.rs] {truncated...}" for file tools,
 /// or a plain truncated input for other tools.
 pub fn format_tool_input(tool_name: &str, tool_input: &str, max_len: usize) -> String {
-    if matches!(tool_name, "Write" | "Edit") {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(tool_input) {
-            if let Some(fp) = v.get("file_path").and_then(|f| f.as_str()) {
-                let short_path = if fp.len() > 40 {
-                    format!("...{}", &fp[fp.len() - 37..])
-                } else {
-                    fp.to_string()
-                };
-                let prefix = format!("[{}]", short_path);
-                let remaining = max_len.saturating_sub(prefix.len() + 1);
-                if remaining > 3 {
-                    let content_key = if tool_name == "Write" { "content" } else { "new_string" };
-                    if let Some(content) = v.get(content_key).and_then(|c| c.as_str()) {
-                        let snippet: String = content.chars()
-                            .filter(|c| !c.is_control())
-                            .take(remaining - 3)
-                            .collect();
-                        return format!("{prefix} {snippet}...");
-                    }
-                }
-                return prefix;
+    // Bash tool: extract and display the command string prominently
+    if tool_name == "Bash"
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(tool_input)
+        && let Some(cmd) = v.get("command").and_then(|c| c.as_str())
+    {
+        let prefix = "$ ";
+        let remaining = max_len.saturating_sub(prefix.len());
+        if cmd.len() > remaining && remaining > 3 {
+            return format!("{prefix}{}...", &cmd[..remaining - 3]);
+        }
+        if cmd.len() > remaining {
+            return format!("{prefix}{}", &cmd[..remaining]);
+        }
+        return format!("{prefix}{cmd}");
+    }
+    if matches!(tool_name, "Write" | "Edit")
+        && let Ok(v) = serde_json::from_str::<serde_json::Value>(tool_input)
+        && let Some(fp) = v.get("file_path").and_then(|f| f.as_str())
+    {
+        let short_path = if fp.len() > 40 {
+            format!("...{}", &fp[fp.len() - 37..])
+        } else {
+            fp.to_string()
+        };
+        let prefix = format!("[{}]", short_path);
+        let remaining = max_len.saturating_sub(prefix.len() + 1);
+        if remaining > 3 {
+            let content_key = if tool_name == "Write" {
+                "content"
+            } else {
+                "new_string"
+            };
+            if let Some(content) = v.get(content_key).and_then(|c| c.as_str()) {
+                let snippet: String = content
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(remaining - 3)
+                    .collect();
+                return format!("{prefix} {snippet}...");
             }
         }
+        return prefix;
     }
     // Fallback: plain truncation
     if tool_input.len() > max_len {
@@ -57,7 +76,10 @@ mod tests {
         let long_path = "a/".repeat(25) + "file.rs"; // well over 40 chars
         let input = format!(r#"{{"file_path":"{}","content":"hello"}}"#, long_path);
         let result = format_tool_input("Write", &input, 80);
-        assert!(result.starts_with("[..."), "expected truncated path, got: {result}");
+        assert!(
+            result.starts_with("[..."),
+            "expected truncated path, got: {result}"
+        );
     }
 
     #[test]
@@ -73,6 +95,23 @@ mod tests {
         let input = "echo hi";
         let result = format_tool_input("Bash", input, 80);
         assert_eq!(result, "echo hi");
+    }
+
+    #[test]
+    fn test_bash_tool_shows_command() {
+        let input = r#"{"command":"git status --short","description":"check status"}"#;
+        let result = format_tool_input("Bash", input, 80);
+        assert_eq!(result, "$ git status --short", "got: {result}");
+    }
+
+    #[test]
+    fn test_bash_tool_long_command_truncated() {
+        let long_cmd = "echo ".to_string() + &"x".repeat(100);
+        let input = format!(r#"{{"command":"{}"}}"#, long_cmd);
+        let result = format_tool_input("Bash", &input, 40);
+        assert!(result.starts_with("$ echo "), "got: {result}");
+        assert!(result.ends_with("..."), "got: {result}");
+        assert!(result.len() <= 40, "got len: {}", result.len());
     }
 
     #[test]

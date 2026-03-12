@@ -20,10 +20,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if sessions.is_empty() {
             println!("  (none)");
         } else {
-            println!("  {:<8} {:<10} {:<8} {:<20} {}",
-                "ID", "STATUS", "PID", "STARTED", "PROMPT");
+            println!(
+                "  {:<8} {:<10} {:<8} {:<20} PROMPT",
+                "ID", "STATUS", "PID", "STARTED"
+            );
             for s in &sessions {
-                let alive = s.pid.map(|p| session::is_pid_alive(p)).unwrap_or(false);
+                let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
                 let status_display = if s.status == "running" && !alive {
                     "dead?"
                 } else {
@@ -34,7 +36,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     s.prompt.clone()
                 };
-                println!("  {:<8} {:<10} {:<8} {:<20} {}",
+                println!(
+                    "  {:<8} {:<10} {:<8} {:<20} {}",
                     &s.session_id[..8],
                     status_display,
                     s.pid.map(|p| p.to_string()).unwrap_or("-".into()),
@@ -52,11 +55,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         if pending.is_empty() {
             println!("  (none)");
         } else {
-            println!("  {:<6} {:<10} {:<15} {:<20} {}",
-                "ID", "SESSION", "TOOL", "SINCE", "INPUT");
+            println!(
+                "  {:<6} {:<10} {:<15} {:<20} INPUT",
+                "ID", "SESSION", "TOOL", "SINCE"
+            );
             for tc in &pending {
                 let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 40);
-                println!("  {:<6} {:<10} {:<15} {:<20} {}",
+                println!(
+                    "  {:<6} {:<10} {:<15} {:<20} {}",
                     tc.id,
                     &tc.session_id[..8.min(tc.session_id.len())],
                     tc.tool_name,

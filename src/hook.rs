@@ -66,7 +66,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let session_id = hook_input.session_id.unwrap_or_else(|| "unknown".into());
     let tool_name = hook_input.tool_name.unwrap_or_default();
-    let tool_input_str = hook_input.tool_input
+    let tool_input_str = hook_input
+        .tool_input
         .map(|v| serde_json::to_string(&v).unwrap_or_default())
         .unwrap_or_default();
 
@@ -77,12 +78,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(decision) = policy::check(&tool_name, &tool_input_str, &config.policies) {
         match decision.as_str() {
             "allow" => {
-                audit::log(&session_id, &tool_name, &tool_input_str, "approve", "Allowed by policy", "policy");
+                audit::log(
+                    &session_id,
+                    &tool_name,
+                    &tool_input_str,
+                    "approve",
+                    "Allowed by policy",
+                    "policy",
+                );
                 print_and_exit(HookOutput::allow());
             }
             "deny" => {
-                audit::log(&session_id, &tool_name, &tool_input_str, "deny", &format!("Denied by policy for tool: {tool_name}"), "policy");
-                print_and_exit(HookOutput::deny(Some(format!("Denied by policy for tool: {tool_name}"))));
+                audit::log(
+                    &session_id,
+                    &tool_name,
+                    &tool_input_str,
+                    "deny",
+                    &format!("Denied by policy for tool: {tool_name}"),
+                    "policy",
+                );
+                print_and_exit(HookOutput::deny(Some(format!(
+                    "Denied by policy for tool: {tool_name}"
+                ))));
             }
             _ => {}
         }
@@ -93,17 +110,40 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         match supervisor::evaluate(&config.supervisor, &tool_name, &tool_input_str) {
             Ok(supervisor::Decision::Approve(reason)) => {
                 eprintln!("[cq supervisor] approved: {reason}");
-                audit::log(&session_id, &tool_name, &tool_input_str, "approve", &reason, "supervisor");
+                audit::log(
+                    &session_id,
+                    &tool_name,
+                    &tool_input_str,
+                    "approve",
+                    &reason,
+                    "supervisor",
+                );
                 print_and_exit(HookOutput::allow());
             }
             Ok(supervisor::Decision::Deny(reason)) => {
                 eprintln!("[cq supervisor] denied: {reason}");
-                audit::log(&session_id, &tool_name, &tool_input_str, "deny", &reason, "supervisor");
-                print_and_exit(HookOutput::deny(Some(format!("Supervisor denied: {reason}"))));
+                audit::log(
+                    &session_id,
+                    &tool_name,
+                    &tool_input_str,
+                    "deny",
+                    &reason,
+                    "supervisor",
+                );
+                print_and_exit(HookOutput::deny(Some(format!(
+                    "Supervisor denied: {reason}"
+                ))));
             }
             Ok(supervisor::Decision::Escalate(reason)) => {
                 eprintln!("[cq supervisor] escalated: {reason}");
-                audit::log(&session_id, &tool_name, &tool_input_str, "escalate", &reason, "supervisor");
+                audit::log(
+                    &session_id,
+                    &tool_name,
+                    &tool_input_str,
+                    "escalate",
+                    &reason,
+                    "supervisor",
+                );
                 // Fall through to human approval
             }
             Err(e) => {

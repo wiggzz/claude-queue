@@ -56,11 +56,14 @@ impl Db {
             std::fs::create_dir_all(parent).ok();
         }
         let conn = Connection::open(path)?;
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             PRAGMA journal_mode=WAL;
             PRAGMA busy_timeout=5000;
-        ")?;
-        conn.execute_batch("
+        ",
+        )?;
+        conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT UNIQUE NOT NULL,
@@ -90,7 +93,8 @@ impl Db {
                 ON tool_calls(session_id);
             CREATE INDEX IF NOT EXISTS idx_sessions_status
                 ON sessions(status);
-        ")?;
+        ",
+        )?;
         // Migrations for existing DBs
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
@@ -99,7 +103,15 @@ impl Db {
 
     // --- Sessions ---
 
-    pub fn create_session(&self, session_id: &str, claude_session_id: Option<&str>, name: Option<&str>, prompt: &str, cwd: &str, pid: u32) -> rusqlite::Result<()> {
+    pub fn create_session(
+        &self,
+        session_id: &str,
+        claude_session_id: Option<&str>,
+        name: Option<&str>,
+        prompt: &str,
+        cwd: &str,
+        pid: u32,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![session_id, claude_session_id, name, prompt, cwd, pid as i64],
@@ -107,7 +119,12 @@ impl Db {
         Ok(())
     }
 
-    pub fn update_session_status(&self, session_id: &str, status: &str, exit_code: Option<i32>) -> rusqlite::Result<()> {
+    pub fn update_session_status(
+        &self,
+        session_id: &str,
+        status: &str,
+        exit_code: Option<i32>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE sessions SET status = ?1, exit_code = ?2, completed_at = datetime('now') WHERE session_id = ?3",
             params![status, exit_code, session_id],
@@ -136,9 +153,30 @@ impl Db {
         }
     }
 
+    /// Return a map of session_id -> display name for all sessions that have a name.
+    pub fn get_session_names(&self) -> rusqlite::Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT session_id, name FROM sessions WHERE name IS NOT NULL")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (id, name) = row?;
+            map.insert(id, name);
+        }
+        Ok(map)
+    }
+
     // --- Tool Calls ---
 
-    pub fn insert_tool_call(&self, session_id: &str, tool_name: &str, tool_input: &str) -> rusqlite::Result<i64> {
+    pub fn insert_tool_call(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+        tool_input: &str,
+    ) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO tool_calls (session_id, tool_name, tool_input) VALUES (?1, ?2, ?3)",
             params![session_id, tool_name, tool_input],
@@ -146,7 +184,12 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
-    pub fn resolve_tool_call(&self, id: i64, status: &str, reason: Option<&str>) -> rusqlite::Result<bool> {
+    pub fn resolve_tool_call(
+        &self,
+        id: i64,
+        status: &str,
+        reason: Option<&str>,
+    ) -> rusqlite::Result<bool> {
         let changed = self.conn.execute(
             "UPDATE tool_calls SET status = ?1, reason = ?2, resolved_at = datetime('now') WHERE id = ?3 AND status = 'pending'",
             params![status, reason, id],
@@ -154,10 +197,13 @@ impl Db {
         Ok(changed > 0)
     }
 
-    pub fn get_tool_call_status(&self, id: i64) -> rusqlite::Result<Option<(String, Option<String>)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT status, reason FROM tool_calls WHERE id = ?1"
-        )?;
+    pub fn get_tool_call_status(
+        &self,
+        id: i64,
+    ) -> rusqlite::Result<Option<(String, Option<String>)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT status, reason FROM tool_calls WHERE id = ?1")?;
         let mut rows = stmt.query_map(params![id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
         })?;
@@ -167,10 +213,17 @@ impl Db {
         }
     }
 
-    pub fn get_pending_tool_calls(&self, session_filter: Option<&str>) -> rusqlite::Result<Vec<ToolCall>> {
+    pub fn get_pending_tool_calls(
+        &self,
+        session_filter: Option<&str>,
+    ) -> rusqlite::Result<Vec<ToolCall>> {
         let sql = match session_filter {
-            Some(_) => "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE status = 'pending' AND session_id LIKE ?1 || '%' ORDER BY id",
-            None => "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE status = 'pending' ORDER BY id",
+            Some(_) => {
+                "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE status = 'pending' AND session_id LIKE ?1 || '%' ORDER BY id"
+            }
+            None => {
+                "SELECT id, session_id, tool_name, tool_input, status, reason, created_at, resolved_at FROM tool_calls WHERE status = 'pending' ORDER BY id"
+            }
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = if let Some(prefix) = session_filter {
@@ -216,7 +269,11 @@ impl Db {
         Ok(changed)
     }
 
-    pub fn approve_all_pending_for_session_and_tool(&self, session_id: &str, tool_name: &str) -> rusqlite::Result<usize> {
+    pub fn approve_all_pending_for_session_and_tool(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+    ) -> rusqlite::Result<usize> {
         let changed = self.conn.execute(
             "UPDATE tool_calls SET status = 'approved', resolved_at = datetime('now') WHERE status = 'pending' AND session_id = ?1 AND tool_name = ?2",
             params![session_id, tool_name],
@@ -251,7 +308,8 @@ mod tests {
     #[test]
     fn test_create_and_get_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "do stuff", "/tmp", 1234).unwrap();
+        db.create_session("s1", None, None, "do stuff", "/tmp", 1234)
+            .unwrap();
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "s1");
@@ -263,8 +321,10 @@ mod tests {
     #[test]
     fn test_find_session_by_name() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", 1).unwrap();
-        db.create_session("s2", None, Some("beta"), "p2", "/tmp", 2).unwrap();
+        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", 1)
+            .unwrap();
+        db.create_session("s2", None, Some("beta"), "p2", "/tmp", 2)
+            .unwrap();
         let found = db.find_session("alpha").unwrap().unwrap();
         assert_eq!(found.session_id, "s1");
         let found = db.find_session("beta").unwrap().unwrap();
@@ -275,7 +335,8 @@ mod tests {
     #[test]
     fn test_find_session_by_id_prefix() {
         let db = open_temp_db();
-        db.create_session("abc-123-def", None, None, "p", "/tmp", 1).unwrap();
+        db.create_session("abc-123-def", None, None, "p", "/tmp", 1)
+            .unwrap();
         let found = db.find_session("abc").unwrap().unwrap();
         assert_eq!(found.session_id, "abc-123-def");
         assert!(db.find_session("xyz").unwrap().is_none());
@@ -285,7 +346,8 @@ mod tests {
     fn test_update_session_status() {
         let db = open_temp_db();
         db.create_session("s1", None, None, "p", "/tmp", 1).unwrap();
-        db.update_session_status("s1", "completed", Some(0)).unwrap();
+        db.update_session_status("s1", "completed", Some(0))
+            .unwrap();
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions[0].status, "completed");
         assert!(sessions[0]._completed_at.is_some());
@@ -295,7 +357,9 @@ mod tests {
     #[test]
     fn test_insert_and_get_tool_call() {
         let db = open_temp_db();
-        let id = db.insert_tool_call("s1", "Bash", r#"{"command":"ls"}"#).unwrap();
+        let id = db
+            .insert_tool_call("s1", "Bash", r#"{"command":"ls"}"#)
+            .unwrap();
         let tc = db.get_tool_call_by_id(id).unwrap().unwrap();
         assert_eq!(tc.session_id, "s1");
         assert_eq!(tc.tool_name, "Bash");

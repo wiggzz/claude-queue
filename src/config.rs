@@ -170,10 +170,26 @@ pub fn ensure_user_config() {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
             policies: vec![
-                Policy { tool: "Read".into(), action: "allow".into(), pattern: None },
-                Policy { tool: "Glob".into(), action: "allow".into(), pattern: None },
-                Policy { tool: "Grep".into(), action: "allow".into(), pattern: None },
-                Policy { tool: "LSP".into(), action: "allow".into(), pattern: None },
+                Policy {
+                    tool: "Read".into(),
+                    action: "allow".into(),
+                    pattern: None,
+                },
+                Policy {
+                    tool: "Glob".into(),
+                    action: "allow".into(),
+                    pattern: None,
+                },
+                Policy {
+                    tool: "Grep".into(),
+                    action: "allow".into(),
+                    pattern: None,
+                },
+                Policy {
+                    tool: "LSP".into(),
+                    action: "allow".into(),
+                    pattern: None,
+                },
             ],
             supervisor: SupervisorConfig::default(),
         };
@@ -184,8 +200,8 @@ pub fn ensure_user_config() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_default_config() {
@@ -236,8 +252,16 @@ mod tests {
         let config = Config {
             timeout: 999,
             poll_interval: 1.5,
-            policies: vec![Policy { tool: "Write".into(), action: "ask".into(), pattern: Some("secret".into()) }],
-            supervisor: SupervisorConfig { enabled: true, model: "sonnet".into(), rules: vec!["be safe".into()] },
+            policies: vec![Policy {
+                tool: "Write".into(),
+                action: "ask".into(),
+                pattern: Some("secret".into()),
+            }],
+            supervisor: SupervisorConfig {
+                enabled: true,
+                model: "sonnet".into(),
+                rules: vec!["be safe".into()],
+            },
         };
         config.save(&path).unwrap();
         let loaded = Config::load_single(&path);

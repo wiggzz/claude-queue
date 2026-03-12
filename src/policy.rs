@@ -85,26 +85,38 @@ mod tests {
 
     #[test]
     fn test_exact_match() {
-        let policies = vec![
-            Policy { tool: "Read".into(), action: "allow".into(), pattern: None },
-        ];
+        let policies = vec![Policy {
+            tool: "Read".into(),
+            action: "allow".into(),
+            pattern: None,
+        }];
         assert_eq!(check("Read", "", &policies), Some("allow".into()));
         assert_eq!(check("Write", "", &policies), None);
     }
 
     #[test]
     fn test_wildcard() {
-        let policies = vec![
-            Policy { tool: "*".into(), action: "deny".into(), pattern: None },
-        ];
+        let policies = vec![Policy {
+            tool: "*".into(),
+            action: "deny".into(),
+            pattern: None,
+        }];
         assert_eq!(check("Anything", "", &policies), Some("deny".into()));
     }
 
     #[test]
     fn test_first_match_wins() {
         let policies = vec![
-            Policy { tool: "Bash".into(), action: "deny".into(), pattern: None },
-            Policy { tool: "*".into(), action: "allow".into(), pattern: None },
+            Policy {
+                tool: "Bash".into(),
+                action: "deny".into(),
+                pattern: None,
+            },
+            Policy {
+                tool: "*".into(),
+                action: "allow".into(),
+                pattern: None,
+            },
         ];
         assert_eq!(check("Bash", "", &policies), Some("deny".into()));
         assert_eq!(check("Read", "", &policies), Some("allow".into()));
@@ -112,17 +124,21 @@ mod tests {
 
     #[test]
     fn test_ask_returns_none() {
-        let policies = vec![
-            Policy { tool: "Bash".into(), action: "ask".into(), pattern: None },
-        ];
+        let policies = vec![Policy {
+            tool: "Bash".into(),
+            action: "ask".into(),
+            pattern: None,
+        }];
         assert_eq!(check("Bash", "", &policies), None);
     }
 
     #[test]
     fn test_glob_pattern() {
-        let policies = vec![
-            Policy { tool: "mcp__*".into(), action: "deny".into(), pattern: None },
-        ];
+        let policies = vec![Policy {
+            tool: "mcp__*".into(),
+            action: "deny".into(),
+            pattern: None,
+        }];
         assert_eq!(check("mcp__chrome", "", &policies), Some("deny".into()));
         assert_eq!(check("Read", "", &policies), None);
     }
@@ -135,7 +151,11 @@ mod tests {
                 action: "allow".into(),
                 pattern: Some(r"^(ls|git status|git log|git diff|cargo build|cargo test)".into()),
             },
-            Policy { tool: "Bash".into(), action: "deny".into(), pattern: None },
+            Policy {
+                tool: "Bash".into(),
+                action: "deny".into(),
+                pattern: None,
+            },
         ];
 
         let safe_input = r#"{"command": "git status"}"#;
@@ -169,13 +189,11 @@ mod tests {
 
     #[test]
     fn test_pattern_with_non_json_input() {
-        let policies = vec![
-            Policy {
-                tool: "Bash".into(),
-                action: "allow".into(),
-                pattern: Some(r"ls".into()),
-            },
-        ];
+        let policies = vec![Policy {
+            tool: "Bash".into(),
+            action: "allow".into(),
+            pattern: Some(r"ls".into()),
+        }];
 
         // Non-JSON input: regex matches against raw string
         assert_eq!(check("Bash", "ls -la", &policies), Some("allow".into()));
@@ -190,7 +208,11 @@ mod tests {
                 action: "allow".into(),
                 pattern: Some(r"^ls$".into()),
             },
-            Policy { tool: "Read".into(), action: "allow".into(), pattern: None },
+            Policy {
+                tool: "Read".into(),
+                action: "allow".into(),
+                pattern: None,
+            },
         ];
 
         // Read has no pattern, so it matches regardless of input
@@ -199,13 +221,11 @@ mod tests {
 
     #[test]
     fn test_invalid_regex_no_match() {
-        let policies = vec![
-            Policy {
-                tool: "Bash".into(),
-                action: "allow".into(),
-                pattern: Some(r"[invalid".into()),
-            },
-        ];
+        let policies = vec![Policy {
+            tool: "Bash".into(),
+            action: "allow".into(),
+            pattern: Some(r"[invalid".into()),
+        }];
 
         assert_eq!(check("Bash", r#"{"command": "ls"}"#, &policies), None);
     }

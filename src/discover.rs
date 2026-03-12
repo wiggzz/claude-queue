@@ -23,12 +23,12 @@ pub struct DiscoveredSession {
 /// Get session IDs managed by cq so we can filter them out.
 fn get_cq_managed_ids() -> HashSet<String> {
     let mut ids = HashSet::new();
-    if let Ok(db) = Db::open(&config::db_path()) {
-        if let Ok(sessions) = db.get_sessions() {
-            for s in sessions {
-                if let Some(claude_id) = s.claude_session_id {
-                    ids.insert(claude_id);
-                }
+    if let Ok(db) = Db::open(&config::db_path())
+        && let Ok(sessions) = db.get_sessions()
+    {
+        for s in sessions {
+            if let Some(claude_id) = s.claude_session_id {
+                ids.insert(claude_id);
             }
         }
     }
@@ -122,27 +122,27 @@ fn parse_session_file(
         };
 
         // Extract session ID
-        if session_id.is_none() {
-            if let Some(id) = val.get("sessionId").and_then(|v| v.as_str()) {
-                if managed_ids.contains(id) {
-                    return None; // This is a cq-managed session, skip it
-                }
-                session_id = Some(id.to_string());
+        if session_id.is_none()
+            && let Some(id) = val.get("sessionId").and_then(|v| v.as_str())
+        {
+            if managed_ids.contains(id) {
+                return None; // This is a cq-managed session, skip it
             }
+            session_id = Some(id.to_string());
         }
 
         // Extract cwd
-        if cwd.is_none() {
-            if let Some(c) = val.get("cwd").and_then(|v| v.as_str()) {
-                cwd = Some(c.to_string());
-            }
+        if cwd.is_none()
+            && let Some(c) = val.get("cwd").and_then(|v| v.as_str())
+        {
+            cwd = Some(c.to_string());
         }
 
         // Extract git branch
-        if git_branch.is_none() {
-            if let Some(branch) = val.get("gitBranch").and_then(|v| v.as_str()) {
-                git_branch = Some(branch.to_string());
-            }
+        if git_branch.is_none()
+            && let Some(branch) = val.get("gitBranch").and_then(|v| v.as_str())
+        {
+            git_branch = Some(branch.to_string());
         }
 
         // Extract first user prompt
@@ -288,25 +288,25 @@ fn search_session_file(
             Err(_) => continue,
         };
 
-        if session_id.is_none() {
-            if let Some(id) = val.get("sessionId").and_then(|v| v.as_str()) {
-                if managed_ids.contains(id) {
-                    return None;
-                }
-                session_id = Some(id.to_string());
+        if session_id.is_none()
+            && let Some(id) = val.get("sessionId").and_then(|v| v.as_str())
+        {
+            if managed_ids.contains(id) {
+                return None;
             }
+            session_id = Some(id.to_string());
         }
 
-        if cwd.is_none() {
-            if let Some(c) = val.get("cwd").and_then(|v| v.as_str()) {
-                cwd = Some(c.to_string());
-            }
+        if cwd.is_none()
+            && let Some(c) = val.get("cwd").and_then(|v| v.as_str())
+        {
+            cwd = Some(c.to_string());
         }
 
-        if git_branch.is_none() {
-            if let Some(branch) = val.get("gitBranch").and_then(|v| v.as_str()) {
-                git_branch = Some(branch.to_string());
-            }
+        if git_branch.is_none()
+            && let Some(branch) = val.get("gitBranch").and_then(|v| v.as_str())
+        {
+            git_branch = Some(branch.to_string());
         }
 
         if first_prompt.is_none() {

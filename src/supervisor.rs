@@ -80,9 +80,12 @@ pub fn evaluate(
     let output = Command::new("claude")
         .args([
             "-p",
-            "--output-format", "json",
-            "--model", &config.model,
-            "--max-turns", "1",
+            "--output-format",
+            "json",
+            "--model",
+            &config.model,
+            "--max-turns",
+            "1",
             "--no-session-persistence",
             &prompt,
         ])
@@ -92,16 +95,23 @@ pub fn evaluate(
     let output = match output {
         Ok(o) => o,
         Err(e) => {
-            return Ok(Decision::Escalate(format!("Failed to invoke supervisor: {e}")));
+            return Ok(Decision::Escalate(format!(
+                "Failed to invoke supervisor: {e}"
+            )));
         }
     };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let code = output.status.code().map(|c| c.to_string()).unwrap_or("signal".into());
+        let code = output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or("signal".into());
         return Ok(Decision::Escalate(format!(
-            "Supervisor process failed (exit {code}): stderr={stderr} stdout={}", &stdout[..stdout.len().min(1000)]
+            "Supervisor process failed (exit {code}): stderr={stderr} stdout={}",
+            &stdout[..stdout.len().min(1000)]
         )));
     }
 
@@ -140,10 +150,10 @@ pub(crate) fn extract_text_from_claude_output(output: &str) -> String {
         // Alternative: array of content blocks
         if let Some(result) = val.get("result").and_then(|v| v.as_array()) {
             for block in result {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        return strip_markdown_fencing(text.trim());
-                    }
+                if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                {
+                    return strip_markdown_fencing(text.trim());
                 }
             }
         }
@@ -205,7 +215,10 @@ mod tests {
     #[test]
     fn test_build_prompt_tool_details() {
         let prompt = build_prompt(&[], "Write", "/tmp/foo.txt");
-        assert!(prompt.contains("Tool: Write"), "prompt should contain tool name");
+        assert!(
+            prompt.contains("Tool: Write"),
+            "prompt should contain tool name"
+        );
         assert!(
             prompt.contains("Input: /tmp/foo.txt"),
             "prompt should contain tool input"

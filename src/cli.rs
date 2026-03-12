@@ -5,28 +5,39 @@ use clap::{Parser, Subcommand};
     name = "cq",
     about = "Claude Queue — orchestrate multiple Claude Code sub-agent sessions",
     long_about = "\
-Claude Queue (cq) lets you run multiple Claude Code sessions in parallel and \
-control their tool permissions from a single place.
+Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
 
-QUICK START (orchestrator workflow):
+QUICK START:
   1. cq start \"fix the auth bug\" --name auth-fix --cwd ~/myproject
   2. cq start \"add tests\" --name tests --cwd ~/myproject
-  3. cq pending                          # see which tool calls need approval
-  4. cq approve all                      # approve all pending tool calls
-  5. cq list                             # check session statuses
-  6. cq result auth-fix                  # get the final output (by name or ID prefix)
-  7. cq resume auth-fix \"now fix the edge case too\"  # continue a session
+  3. cq pending                    # tool calls waiting for approval
+  4. cq approve all                # approve everything pending
+  5. cq list                       # check session statuses
+  6. cq result auth-fix            # get final output (by name or ID prefix)
+  7. cq resume auth-fix \"now fix the edge case too\"
 
-TOOL CALL GATING:
-  Sub-agents run with all permissions bypassed — instead, a hook intercepts \
-  every tool call and checks it against your policies (cq policy list). \
-  Read-only tools (Read, Glob, Grep) are auto-approved by default. \
-  Everything else blocks until you run 'cq approve <id>' or 'cq deny <id>'.
+BEST PRACTICES FOR ORCHESTRATORS:
+  - Always use --name so you can refer to sessions later
+  - Use --cwd to set each sub-agent's working directory
+  - For agents editing overlapping files, use git worktrees:
+      git worktree add ../my-worktree && cq start \"...\" --cwd ../my-worktree
+  - cq start returns immediately — do NOT call cq wait or
+    cq pending --wait in your main loop (they block and will deadlock)
+  - Poll with: cq list (statuses) and cq pending (approvals) — both instant
+  - Batch approve with filters:
+      cq approve all [--session <name>] [--tool <tool>] [--match <regex>]
+  - Get output: cq result <name> once a session completes
 
-POLICIES:
-  User-level:    ~/.cq/config.json
-  Project-level: .cq/config.json (in project root, takes priority)
-  Manage with:   cq policy list | cq policy add <tool> <action>"
+POLICIES & SUPERVISOR:
+  Policies control which tools are auto-approved, denied, or escalated.
+  Config files (project takes priority over user):
+    Project: .cq/config.json    User: ~/.cq/config.json
+  Enable the supervisor in config for LLM-driven auto-approve/deny.
+  View active stack: cq policy list
+
+MONITORING:
+  cq watch              Live dashboard (sessions + pending approvals)
+  cq audit --follow     Real-time decision log (run in a background task)"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -58,7 +69,10 @@ pub enum Commands {
         /// Filter by session ID (prefix match)
         #[arg(long)]
         session: Option<String>,
-        /// Block until a new pending tool call appears, print it, then exit
+        /// Block until a new pending tool call appears, print it, then exit.
+        /// WARNING: This is blocking! Only use in background tasks or scripts,
+        /// never in an orchestrator's main loop. Use 'cq pending' (without --wait)
+        /// for non-blocking checks.
         #[arg(long, short)]
         wait: bool,
         /// Output pending calls as JSON Lines (one JSON object per line)
@@ -119,6 +133,10 @@ pub enum Commands {
         cwd: String,
     },
     /// Block until a session completes: cq wait <name-or-id>
+    ///
+    /// WARNING: This is blocking! Only use in background tasks or scripts,
+    /// never in an orchestrator's main loop. Use 'cq list' to check status
+    /// non-blockingly.
     Wait {
         /// Session name or ID (prefix match)
         session_id: String,
