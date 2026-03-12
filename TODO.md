@@ -58,11 +58,6 @@ This would eliminate the need to manually copy `.cq/config.json` into each workt
 
 During this session, the supervisor approved `git push` despite its rules saying DENY, because the agent's prompt context ("Step 4: Push to main") convinced it to override its own rules. Fix: don't pass the session prompt/task to the supervisor by default. The supervisor should evaluate tool calls purely on their own merit against the rules. This can be an opt-in feature (`include_session_context: true` in config) for users who want the supervisor to allow things explicitly asked for by the agent's task.
 
-## Audit log: show tool call details inline
-**Priority:** Medium — observability
-
-`cq audit` shows tool name and decision but doesn't show the actual command by default. The audit-bash-display improvement was made but the output still truncates. Consider showing the full command/file path for all entries by default, or at least a `--verbose` flag. The audit log is the primary debugging tool — it should be maximally informative.
-
 ## README: prerequisites and contributing
 **Priority:** Medium — public release
 
@@ -130,3 +125,4 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Self-update command (cq update)~~
 - ~~Audit log: show session names instead of IDs~~
 - ~~Audit log: show bash command contents~~
+- ~~Audit log: show tool call details inline (`--verbose` flag)~~
