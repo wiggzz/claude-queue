@@ -155,6 +155,16 @@ impl Db {
         }
     }
 
+    /// Find ALL sessions matching a name, ordered by started_at ASC.
+    /// Only matches by exact name. Returns empty vec if no matches.
+    pub fn find_sessions_by_name(&self, name: &str) -> rusqlite::Result<Vec<Session>> {
+        let sql =
+            format!("SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 ORDER BY started_at ASC");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![name], map_session)?;
+        rows.collect()
+    }
+
     /// Return a map of session_id -> display name for all sessions that have a name.
     pub fn get_session_names(&self) -> rusqlite::Result<std::collections::HashMap<String, String>> {
         let mut stmt = self
@@ -352,6 +362,29 @@ mod tests {
         let found = db.find_session("beta").unwrap().unwrap();
         assert_eq!(found.session_id, "s2");
         assert!(db.find_session("gamma").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_find_sessions_by_name_returns_all() {
+        let db = open_temp_db();
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+            .unwrap();
+        db.create_session("s2", None, Some("other"), "p2", "/tmp", 2)
+            .unwrap();
+        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", 3)
+            .unwrap();
+
+        let sessions = db.find_sessions_by_name("mytask").unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "s1");
+        assert_eq!(sessions[1].session_id, "s3");
+
+        let sessions = db.find_sessions_by_name("other").unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "s2");
+
+        let sessions = db.find_sessions_by_name("nonexistent").unwrap();
+        assert!(sessions.is_empty());
     }
 
     #[test]
