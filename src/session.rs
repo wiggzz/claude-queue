@@ -330,17 +330,19 @@ mod tests {
             .unwrap();
         let main_cq = main_dir.path().join(".cq");
         fs::create_dir_all(&main_cq).unwrap();
-        fs::write(
-            main_cq.join("config.json"),
-            r#"{"timeout": 999}"#,
-        )
-        .unwrap();
+        fs::write(main_cq.join("config.json"), r#"{"timeout": 999}"#).unwrap();
 
         // Create a worktree
         let wt_dir = tempfile::tempdir().unwrap();
         let wt_path = wt_dir.path().join("wt");
         Command::new("git")
-            .args(["worktree", "add", wt_path.to_str().unwrap(), "-b", "wt-branch"])
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-branch",
+            ])
             .current_dir(main_dir.path())
             .output()
             .unwrap();
