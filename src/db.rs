@@ -7,17 +7,17 @@ pub struct Db {
 
 #[derive(Debug)]
 pub struct Session {
-    pub id: i64,
+    pub _id: i64,
     pub session_id: String,
     pub claude_session_id: Option<String>,
     pub name: Option<String>,
     pub prompt: String,
-    pub cwd: String,
+    pub _cwd: String,
     pub status: String,
     pub pid: Option<i64>,
     pub started_at: String,
-    pub completed_at: Option<String>,
-    pub exit_code: Option<i32>,
+    pub _completed_at: Option<String>,
+    pub _exit_code: Option<i32>,
 }
 
 #[derive(Debug)]
@@ -36,17 +36,17 @@ const SESSION_COLS: &str = "id, session_id, claude_session_id, name, prompt, cwd
 
 fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
-        id: row.get(0)?,
+        _id: row.get(0)?,
         session_id: row.get(1)?,
         claude_session_id: row.get(2)?,
         name: row.get(3)?,
         prompt: row.get(4)?,
-        cwd: row.get(5)?,
+        _cwd: row.get(5)?,
         status: row.get(6)?,
         pid: row.get(7)?,
         started_at: row.get(8)?,
-        completed_at: row.get(9)?,
-        exit_code: row.get(10)?,
+        _completed_at: row.get(9)?,
+        _exit_code: row.get(10)?,
     })
 }
 
@@ -130,20 +130,6 @@ impl Db {
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![query], map_session)?;
-        match rows.next() {
-            Some(row) => Ok(Some(row?)),
-            None => Ok(None),
-        }
-    }
-
-    /// Find the most recent session with a given claude_session_id.
-    /// Used to look up the claude session ID for resuming.
-    pub fn find_by_claude_session(&self, claude_session_id: &str) -> rusqlite::Result<Option<Session>> {
-        let sql = format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE claude_session_id = ?1 ORDER BY id DESC LIMIT 1"
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut rows = stmt.query_map(params![claude_session_id], map_session)?;
         match rows.next() {
             Some(row) => Ok(Some(row?)),
             None => Ok(None),

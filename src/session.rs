@@ -1,7 +1,7 @@
 use crate::config;
 use crate::db::Db;
 use std::fs;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 /// Start a brand new sub-agent session.
 pub fn start(prompt: &str, name: Option<&str>, cwd: &str) -> Result<String, Box<dyn std::error::Error>> {

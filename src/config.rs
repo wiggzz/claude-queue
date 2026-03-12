@@ -114,10 +114,6 @@ impl Config {
         }
     }
 
-    pub fn load_user_only() -> Self {
-        Self::load_single(&user_config_path())
-    }
-
     fn load_single(path: &Path) -> Self {
         match fs::read_to_string(path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
