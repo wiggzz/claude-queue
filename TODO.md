@@ -22,10 +22,10 @@ Possible approaches:
 - Unified feed: interleave events from all agents with session labels, color-coded
 - Could feed into the TUI as a split pane (approvals on one side, activity on the other)
 
-## PR checks integration
-**Priority:** Medium — workflow
+## PR checks: require CI to pass before merge
+**Priority:** Medium — repo hygiene
 
-Automatically run checks on PRs using cq-managed agents. E.g. `cq pr-check 123` spins up agents to review code, run tests, check for regressions, and post results as PR comments. Could integrate with GitHub Actions or run locally. The orchestrator pattern is already there — this is just a pre-built workflow on top of it.
+Enable branch protection on `main` requiring CI checks to pass before PRs can merge. Also consider adding e2e tests to the CI pipeline once they exist (see "End-to-end tests" item).
 
 ## Multi-agent backend support
 **Priority:** Medium — extensibility
