@@ -104,12 +104,45 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 None if wait => {
-                    // Snapshot current pending IDs so we only react to new ones
-                    let mut known_ids: std::collections::HashSet<i64> = db
-                        .get_pending_tool_calls(session.as_deref())?
-                        .iter()
-                        .map(|tc| tc.id)
-                        .collect();
+                    // If there are already pending calls, print them and exit
+                    // (same behavior as without --wait)
+                    let existing = db.get_pending_tool_calls(session.as_deref())?;
+                    if !existing.is_empty() {
+                        if full {
+                            for (i, tc) in existing.iter().enumerate() {
+                                if i > 0 {
+                                    println!("{}", "-".repeat(60));
+                                }
+                                println!("ID:        {}", tc.id);
+                                println!("Session:   {}", &tc.session_id[..8.min(tc.session_id.len())]);
+                                println!("Tool:      {}", tc.tool_name);
+                                println!("Since:     {}", tc.created_at);
+                                println!("\nInput:");
+                                match serde_json::from_str::<serde_json::Value>(&tc.tool_input) {
+                                    Ok(val) => println!("{}", serde_json::to_string_pretty(&val).unwrap()),
+                                    Err(_) => println!("{}", tc.tool_input),
+                                }
+                                println!();
+                            }
+                        } else {
+                            println!("{:<6} {:<10} {:<15} {:<20} {}",
+                                "ID", "SESSION", "TOOL", "SINCE", "INPUT");
+                            for tc in &existing {
+                                let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
+                                println!("{:<6} {:<10} {:<15} {:<20} {}",
+                                    tc.id,
+                                    &tc.session_id[..8.min(tc.session_id.len())],
+                                    tc.tool_name,
+                                    &tc.created_at,
+                                    input_short,
+                                );
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Queue is empty — poll for new calls
+                    let mut known_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
 
                     loop {
                         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -180,22 +213,36 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Approve { id, session } => {
+        Commands::Approve { id, session, tool } => {
             let db = open_db()?;
             if id == "all" {
-                if let Some(session_filter) = session {
-                    let sess = db.find_session(&session_filter)?
-                        .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
-                    let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
-                    let count = db.approve_all_pending_for_session(&sess.session_id)?;
-                    println!("Approved {count} pending tool call(s) for session {display}.");
-                } else {
-                    let count = db.approve_all_pending()?;
-                    println!("Approved {count} pending tool call(s).");
+                match (session, tool) {
+                    (Some(session_filter), Some(tool_name)) => {
+                        let sess = db.find_session(&session_filter)?
+                            .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
+                        let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                        let count = db.approve_all_pending_for_session_and_tool(&sess.session_id, &tool_name)?;
+                        println!("Approved {count} pending {tool_name} call(s) for session {display}.");
+                    }
+                    (Some(session_filter), None) => {
+                        let sess = db.find_session(&session_filter)?
+                            .ok_or_else(|| format!("No session matching '{session_filter}'"))?;
+                        let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
+                        let count = db.approve_all_pending_for_session(&sess.session_id)?;
+                        println!("Approved {count} pending tool call(s) for session {display}.");
+                    }
+                    (None, Some(tool_name)) => {
+                        let count = db.approve_all_pending_for_tool(&tool_name)?;
+                        println!("Approved {count} pending {tool_name} call(s).");
+                    }
+                    (None, None) => {
+                        let count = db.approve_all_pending()?;
+                        println!("Approved {count} pending tool call(s).");
+                    }
                 }
             } else {
-                if session.is_some() {
-                    return Err("--session can only be used with 'cq approve all'".into());
+                if session.is_some() || tool.is_some() {
+                    return Err("--session and --tool can only be used with 'cq approve all'".into());
                 }
                 let id: i64 = id.parse().map_err(|_| "Invalid ID. Use a number or 'all'.")?;
                 if db.resolve_tool_call(id, "approved", None)? {
@@ -427,7 +474,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             p.tool, p.action);
                     }
                 }
-                PolicyCommands::Add { tool, action, user } => {
+                PolicyCommands::Add { tool, action, user, pattern } => {
                     if !["allow", "deny", "ask"].contains(&action.as_str()) {
                         return Err("Action must be 'allow', 'deny', or 'ask'".into());
                     }
@@ -438,10 +485,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     };
                     let mut cfg = config::load_file(&path);
                     cfg.policies.retain(|p| p.tool != tool);
-                    cfg.policies.push(config::Policy { tool: tool.clone(), action: action.clone(), pattern: None });
+                    cfg.policies.push(config::Policy { tool: tool.clone(), action: action.clone(), pattern: pattern.clone() });
                     cfg.save(&path)?;
                     let scope = if user { "user" } else { "project" };
-                    println!("Added policy: {tool} -> {action} ({scope})");
+                    let pattern_msg = pattern.map(|p| format!(" (pattern: {p})")).unwrap_or_default();
+                    println!("Added policy: {tool} -> {action}{pattern_msg} ({scope})");
                 }
                 PolicyCommands::Remove { tool, user } => {
                     let path = if user {
