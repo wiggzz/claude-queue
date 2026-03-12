@@ -191,7 +191,11 @@ pub fn ensure_user_config() {
                     pattern: None,
                 },
             ],
-            supervisor: SupervisorConfig::default(),
+            supervisor: SupervisorConfig {
+                enabled: true,
+                model: default_supervisor_model(),
+                rules: Vec::new(),
+            },
         };
         let _ = config.save(&path);
     }
