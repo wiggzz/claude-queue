@@ -47,7 +47,11 @@ pub enum Commands {
         cwd: String,
     },
     /// List all sessions with their status (running, completed, failed)
-    List,
+    List {
+        /// Filter by session name (contains match) or session ID (prefix match)
+        #[arg(long)]
+        session: Option<String>,
+    },
     /// Show tool calls waiting for your approval
     Pending {
         /// Filter by session ID (prefix match)

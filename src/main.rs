@@ -39,9 +39,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("Resumed session: {new_session_id}");
         }
 
-        Commands::List => {
+        Commands::List { session } => {
             let db = open_db()?;
-            let sessions = db.get_sessions()?;
+            let mut sessions = db.get_sessions()?;
+            if let Some(ref filter) = session {
+                sessions.retain(|s| {
+                    s.name.as_deref().map_or(false, |n| n.contains(filter.as_str()))
+                        || s.session_id.starts_with(filter.as_str())
+                });
+            }
             if sessions.is_empty() {
                 println!("No sessions.");
                 return Ok(());
