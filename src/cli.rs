@@ -67,13 +67,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<PendingCommands>,
     },
-    /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>]
+    /// Approve a pending tool call: cq approve <id> or cq approve all [--session <name>] [--tool <name>]
     Approve {
         /// Tool call ID (number) or "all" to approve everything pending
         id: String,
         /// Only approve tool calls for this session (name or ID prefix)
         #[arg(long)]
         session: Option<String>,
+        /// Only approve tool calls for this tool type (e.g. "Bash", "Edit", "Write")
+        #[arg(long)]
+        tool: Option<String>,
     },
     /// Deny a pending tool call: cq deny <id> [--reason "..."]
     Deny {
@@ -173,6 +176,9 @@ pub enum PolicyCommands {
         /// Save to user config (~/.cq/config.json) instead of project config
         #[arg(long)]
         user: bool,
+        /// Regex pattern to match against tool_input (e.g. "rm -rf" for Bash)
+        #[arg(long)]
+        pattern: Option<String>,
     },
     /// Remove a policy: cq policy remove <tool> [--user]
     Remove {
