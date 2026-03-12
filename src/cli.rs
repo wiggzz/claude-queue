@@ -100,6 +100,11 @@ pub enum Commands {
     },
     /// Live dashboard: sessions + pending approvals, refreshes every 2s
     Watch,
+    /// Discover and search non-cq-managed Claude Code sessions
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommands,
+    },
     /// Manage auto-approve/deny policies for tool calls
     Policy {
         #[command(subcommand)]
@@ -108,6 +113,26 @@ pub enum Commands {
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
+}
+
+#[derive(Subcommand)]
+pub enum SessionsCommands {
+    /// List recent Claude Code sessions (not managed by cq)
+    List {
+        /// Maximum number of sessions to show
+        #[arg(long, short, default_value = "20")]
+        limit: usize,
+    },
+    /// Search session content for a string (e.g. ticket ID, file path, PR number)
+    Search {
+        /// Text to search for across all session content
+        query: String,
+    },
+    /// Show details for a specific session
+    Show {
+        /// Session ID (prefix match)
+        session_id: String,
+    },
 }
 
 #[derive(Subcommand)]

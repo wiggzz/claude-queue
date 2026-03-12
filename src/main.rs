@@ -1,13 +1,14 @@
 mod cli;
 mod config;
 mod db;
+mod discover;
 mod hook;
 mod policy;
 mod session;
 mod watch;
 
 use clap::Parser;
-use cli::{Cli, Commands, PolicyCommands};
+use cli::{Cli, Commands, PolicyCommands, SessionsCommands};
 use config::Config;
 
 fn main() {
@@ -174,6 +175,107 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Watch => {
             watch::run()?;
+        }
+
+        Commands::Sessions { command } => {
+            match command {
+                SessionsCommands::List { limit } => {
+                    let sessions = discover::scan_sessions();
+                    if sessions.is_empty() {
+                        println!("No external Claude Code sessions found.");
+                        return Ok(());
+                    }
+                    let count = sessions.len().min(limit);
+                    println!("{:<38} {:<12} {:<20} {}",
+                        "SESSION ID", "BRANCH", "LAST ACTIVITY", "PROMPT");
+                    for s in sessions.into_iter().take(count) {
+                        let branch = s.git_branch.as_deref().unwrap_or("-");
+                        let branch_short = if branch.len() > 10 {
+                            format!("{}...", &branch[..7])
+                        } else {
+                            branch.to_string()
+                        };
+                        let activity = s.last_activity.as_deref().unwrap_or("-");
+                        let activity_short = if activity.len() > 19 {
+                            &activity[..19]
+                        } else {
+                            activity
+                        };
+                        let prompt = match &s.first_prompt {
+                            Some(p) if p.len() > 50 => format!("{}...", &p[..47]),
+                            Some(p) => p.clone(),
+                            None => "(no prompt)".to_string(),
+                        };
+                        println!("{:<38} {:<12} {:<20} {}",
+                            &s.session_id[..38.min(s.session_id.len())],
+                            branch_short,
+                            activity_short,
+                            prompt,
+                        );
+                    }
+                    println!("\nResume with: claude --resume <session-id>");
+                }
+                SessionsCommands::Search { query } => {
+                    let results = discover::search_sessions(&query);
+                    if results.is_empty() {
+                        println!("No sessions found matching \"{query}\".");
+                        return Ok(());
+                    }
+                    println!("Found {} session(s) matching \"{query}\":\n", results.len());
+                    for s in &results {
+                        let prompt = match &s.first_prompt {
+                            Some(p) if p.len() > 80 => format!("{}...", &p[..77]),
+                            Some(p) => p.clone(),
+                            None => "(no prompt)".to_string(),
+                        };
+                        println!("  {} {}", &s.session_id, s.project_dir);
+                        if let Some(branch) = &s.git_branch {
+                            print!("    branch: {branch}");
+                        }
+                        if let Some(activity) = &s.last_activity {
+                            print!("  last active: {activity}");
+                        }
+                        println!();
+                        println!("    prompt: {prompt}");
+                        println!("    resume: claude --resume {}", s.session_id);
+                        println!();
+                    }
+                }
+                SessionsCommands::Show { session_id } => {
+                    let session = discover::find_session(&session_id)
+                        .ok_or_else(|| format!("No session found matching '{session_id}'"))?;
+
+                    println!("Session:      {}", session.session_id);
+                    println!("Project:      {}", session.project_dir);
+                    if let Some(cwd) = &session.cwd {
+                        println!("Working dir:  {cwd}");
+                    }
+                    if let Some(branch) = &session.git_branch {
+                        println!("Branch:       {branch}");
+                    }
+                    if let Some(activity) = &session.last_activity {
+                        println!("Last active:  {activity}");
+                    }
+                    println!("Messages:     {}", session.message_count);
+                    if let Some(prompt) = &session.first_prompt {
+                        println!("First prompt: {prompt}");
+                    }
+                    println!("File:         {}", session.jsonl_path.display());
+                    println!();
+
+                    // Show recent conversation summary
+                    let summary = discover::get_session_summary(&session.jsonl_path, 10);
+                    if !summary.is_empty() {
+                        println!("Recent activity:");
+                        for msg in &summary {
+                            println!("  {msg}");
+                        }
+                        println!();
+                    }
+
+                    println!("Resume with: claude --resume {}", session.session_id);
+                }
+            }
         }
 
         Commands::Policy { command } => {
