@@ -40,10 +40,47 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run()?;
         }
 
-        Commands::Start { prompt, name, cwd } => {
-            let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
-            let display = name.as_deref().unwrap_or(&session_id[..8]);
-            println!("Started session: {display} ({session_id})");
+        Commands::Start {
+            prompt,
+            name,
+            cwd,
+            cancel,
+        } => {
+            if cancel {
+                let name = name
+                    .as_deref()
+                    .ok_or("--cancel requires --name")?;
+                let db = open_db()?;
+                if db.clear_queued_prompt(name)? {
+                    println!("Cancelled queued prompt for session {name}");
+                } else {
+                    eprintln!("No session found with name '{name}'");
+                    std::process::exit(1);
+                }
+            } else if let Some(ref name) = name {
+                let db = open_db()?;
+                // Check if there's already a running session with this name
+                let sessions = db.find_sessions_by_name(name)?;
+                let has_running = sessions.iter().any(|s| {
+                    if s.status != "running" {
+                        return false;
+                    }
+                    s.pid.map(session::is_pid_alive).unwrap_or(false)
+                });
+                if has_running {
+                    // Queue the prompt instead of starting a new session
+                    db.queue_prompt(name, &prompt)?;
+                    println!("Queued prompt for session {name} (will deliver on completion)");
+                } else {
+                    drop(db);
+                    let session_id = session::start(&prompt, Some(name.as_str()), &cwd)?;
+                    println!("Started session: {name} ({session_id})");
+                }
+            } else {
+                let session_id = session::start(&prompt, None, &cwd)?;
+                let display = &session_id[..8];
+                println!("Started session: {display} ({session_id})");
+            }
         }
 
         Commands::Resume {
@@ -95,7 +132,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 return Ok(());
             }
             println!(
-                "{:<14} {:<10} {:<20} PROMPT",
+                "{:<14} {:<18} {:<20} PROMPT",
                 "NAME/ID", "STATUS", "STARTED"
             );
             for (s, resolved_status) in &rows {
@@ -105,9 +142,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     s.prompt.clone()
                 };
+                let status_display = if s.queued_prompt.is_some() {
+                    format!("{} (queued)", resolved_status)
+                } else {
+                    resolved_status.to_string()
+                };
                 println!(
-                    "{:<14} {:<10} {:<20} {}",
-                    id_display, resolved_status, &s.started_at, prompt_short,
+                    "{:<14} {:<18} {:<20} {}",
+                    id_display, status_display, &s.started_at, prompt_short,
                 );
             }
         }

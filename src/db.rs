@@ -18,6 +18,7 @@ pub struct Session {
     pub started_at: String,
     pub _completed_at: Option<String>,
     pub _exit_code: Option<i32>,
+    pub queued_prompt: Option<String>,
 }
 
 #[derive(Debug)]
@@ -33,7 +34,7 @@ pub struct ToolCall {
     pub resolved_at: Option<String>,
 }
 
-const SESSION_COLS: &str = "id, session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
+const SESSION_COLS: &str = "id, session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code, queued_prompt";
 
 fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
@@ -48,6 +49,7 @@ fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         started_at: row.get(8)?,
         _completed_at: row.get(9)?,
         _exit_code: row.get(10)?,
+        queued_prompt: row.get(11)?,
     })
 }
 
@@ -100,6 +102,7 @@ impl Db {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
         let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN queued_prompt TEXT", []);
         Ok(Db { conn })
     }
 
@@ -179,6 +182,38 @@ impl Db {
             map.insert(id, name);
         }
         Ok(map)
+    }
+
+    // --- Queued Prompts ---
+
+    /// Set (or replace) a queued prompt for the most recent session with the given name.
+    pub fn queue_prompt(&self, name: &str, prompt: &str) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET queued_prompt = ?1 WHERE id = (SELECT id FROM sessions WHERE name = ?2 ORDER BY id DESC LIMIT 1)",
+            params![prompt, name],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Clear the queued prompt for the most recent session with the given name.
+    pub fn clear_queued_prompt(&self, name: &str) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET queued_prompt = NULL WHERE id = (SELECT id FROM sessions WHERE name = ?1 ORDER BY id DESC LIMIT 1)",
+            params![name],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Get the queued prompt (if any) for the most recent session with the given name.
+    pub fn get_queued_prompt(&self, name: &str) -> rusqlite::Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT queued_prompt FROM sessions WHERE name = ?1 ORDER BY id DESC LIMIT 1",
+        )?;
+        let mut rows = stmt.query_map(params![name], |row| row.get::<_, Option<String>>(0))?;
+        match rows.next() {
+            Some(row) => Ok(row?),
+            None => Ok(None),
+        }
     }
 
     // --- Tool Calls ---
@@ -596,5 +631,72 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].summary.as_deref(), Some("Does something"));
         assert!(pending[1].summary.is_none());
+    }
+
+    #[test]
+    fn test_queue_prompt_sets_and_replaces() {
+        let db = open_temp_db();
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+            .unwrap();
+        // Queue a prompt
+        assert!(db.queue_prompt("mytask", "follow-up 1").unwrap());
+        assert_eq!(
+            db.get_queued_prompt("mytask").unwrap(),
+            Some("follow-up 1".to_string())
+        );
+        // Replace it
+        assert!(db.queue_prompt("mytask", "follow-up 2").unwrap());
+        assert_eq!(
+            db.get_queued_prompt("mytask").unwrap(),
+            Some("follow-up 2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_clear_queued_prompt() {
+        let db = open_temp_db();
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+            .unwrap();
+        db.queue_prompt("mytask", "follow-up").unwrap();
+        assert!(db.get_queued_prompt("mytask").unwrap().is_some());
+        assert!(db.clear_queued_prompt("mytask").unwrap());
+        assert!(db.get_queued_prompt("mytask").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_queued_prompt_none_by_default() {
+        let db = open_temp_db();
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+            .unwrap();
+        assert!(db.get_queued_prompt("mytask").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_get_queued_prompt_nonexistent_name() {
+        let db = open_temp_db();
+        assert!(db.get_queued_prompt("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_queue_prompt_targets_most_recent_session() {
+        let db = open_temp_db();
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+            .unwrap();
+        db.create_session("s2", None, Some("mytask"), "p2", "/tmp", 2)
+            .unwrap();
+        db.queue_prompt("mytask", "queued msg").unwrap();
+        // The queued prompt should be on s2 (most recent), not s1
+        let sessions = db.find_sessions_by_name("mytask").unwrap();
+        assert!(sessions[0].queued_prompt.is_none()); // s1
+        assert_eq!(
+            sessions[1].queued_prompt.as_deref(),
+            Some("queued msg")
+        ); // s2
+    }
+
+    #[test]
+    fn test_queue_prompt_nonexistent_name_returns_false() {
+        let db = open_temp_db();
+        assert!(!db.queue_prompt("nonexistent", "msg").unwrap());
     }
 }

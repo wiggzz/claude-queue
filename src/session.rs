@@ -67,6 +67,38 @@ pub fn resume(
     )
 }
 
+/// Internal resume used by the completion callback to auto-deliver queued prompts.
+/// Takes the claude session ID directly (no DB lookup needed).
+fn resume_internal(
+    claude_sid: &str,
+    name: &str,
+    prompt: &str,
+    cwd: &str,
+    _db_path: &Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let cq_session_id = uuid::Uuid::new_v4().to_string();
+    let args = vec![
+        "-p".to_string(),
+        "--session-id".to_string(),
+        claude_sid.to_string(),
+        prompt.to_string(),
+    ];
+
+    let display_prompt = format!(
+        "[queued-resume {}] {}",
+        &claude_sid[..8.min(claude_sid.len())],
+        prompt
+    );
+    launch(
+        &cq_session_id,
+        Some(claude_sid),
+        Some(name),
+        &display_prompt,
+        cwd,
+        args,
+    )
+}
+
 /// Common launch logic for both start and resume.
 fn launch(
     session_id: &str,
@@ -144,6 +176,7 @@ fn launch(
     // Spawn a thread to wait for completion and update DB
     let sid = session_id.to_string();
     let dbp = db_path.clone();
+    let cwd_for_thread = cwd_abs.to_string_lossy().to_string();
     std::thread::spawn(move || {
         let mut child = child;
         let status = child.wait();
@@ -160,6 +193,18 @@ fn launch(
                 }
                 Err(_) => {
                     let _ = db.update_session_status(&sid, "failed", None);
+                }
+            }
+
+            // Check for a queued prompt and auto-resume if present
+            if let Ok(Some(sess)) = db.find_session(&sid) {
+                if let Some(ref session_name) = sess.name {
+                    if let Ok(Some(queued)) = db.get_queued_prompt(session_name) {
+                        let _ = db.clear_queued_prompt(session_name);
+                        // Use the claude_session_id from the completed session for continuity
+                        let claude_sid = sess.claude_session_id.as_deref().unwrap_or(&sid);
+                        let _ = resume_internal(claude_sid, session_name, &queued, &cwd_for_thread, &dbp);
+                    }
                 }
             }
         }
