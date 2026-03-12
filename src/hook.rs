@@ -75,9 +75,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|v| serde_json::to_string(&v).unwrap_or_default())
         .unwrap_or_default();
 
-    // Load config and check policies
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let config = Config::load(&cwd);
+    // Load config — use CQ_PROJECT_DIR (set by cq start) to find the project root,
+    // which handles git worktrees correctly. Falls back to cwd.
+    let project_dir = std::env::var("CQ_PROJECT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let config = Config::load(&project_dir);
 
     if let Some(decision) = policy::check(&tool_name, &tool_input_str, &config.policies) {
         match decision.as_str() {

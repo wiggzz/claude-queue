@@ -1,6 +1,7 @@
 use crate::config;
 use crate::db::Db;
 use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 /// Start a brand new sub-agent session.
@@ -76,6 +77,7 @@ fn launch(
     extra_args: Vec<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let cwd_abs = fs::canonicalize(cwd)?;
+    let project_root = resolve_project_root(&cwd_abs);
     let db_path = config::db_path();
     let log_dir = config::log_dir();
     fs::create_dir_all(&log_dir)?;
@@ -116,6 +118,7 @@ fn launch(
         ])
         .env("CQ_MANAGED", "1")
         .env("CQ_DB", db_path.to_string_lossy().as_ref())
+        .env("CQ_PROJECT_DIR", project_root.to_string_lossy().as_ref())
         .env("CQ_SESSION_CWD", cwd_abs.to_string_lossy().as_ref())
         .env("CQ_SESSION_NAME", name.unwrap_or(""))
         .env("CQ_SESSION_PROMPT", prompt_display)
@@ -220,6 +223,49 @@ pub fn kill_session(pid: i64) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Resolve the project root directory, handling git worktrees.
+/// If `cwd` itself contains `.cq/config.json`, it is used directly (local config wins).
+/// Otherwise, for worktrees, returns the main repository's root.
+/// Falls back to `git rev-parse --show-toplevel`, then to the given cwd.
+pub fn resolve_project_root(cwd: &Path) -> std::path::PathBuf {
+    // If cwd has its own .cq/config.json, use it directly — local config takes precedence.
+    if cwd.join(".cq").join("config.json").exists() {
+        return cwd.to_path_buf();
+    }
+
+    // Try git --git-common-dir to find the shared .git directory.
+    // For worktrees this points to the main repo's .git dir.
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(cwd)
+        .output()
+        && output.status.success()
+    {
+        let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let common_path = std::path::Path::new(&common_dir);
+        // The common git dir is <repo>/.git — parent is the project root
+        if let Some(root) = common_path.parent() {
+            return root.to_path_buf();
+        }
+    }
+
+    // Fallback: git toplevel
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        && output.status.success()
+    {
+        let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !toplevel.is_empty() {
+            return std::path::PathBuf::from(toplevel);
+        }
+    }
+
+    // Not a git repo — use cwd
+    cwd.to_path_buf()
+}
+
 pub fn is_pid_alive(pid: i64) -> bool {
     #[cfg(unix)]
     {
@@ -228,5 +274,95 @@ pub fn is_pid_alive(pid: i64) -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_project_root_prefers_local_config() {
+        // Create a temp dir with .cq/config.json — should be returned as-is
+        let dir = tempfile::tempdir().unwrap();
+        let cq_dir = dir.path().join(".cq");
+        fs::create_dir_all(&cq_dir).unwrap();
+        fs::write(cq_dir.join("config.json"), r#"{"timeout": 100}"#).unwrap();
+
+        let result = resolve_project_root(dir.path());
+        assert_eq!(result, dir.path());
+    }
+
+    #[test]
+    fn test_resolve_project_root_falls_back_to_git_root() {
+        // Create a temp git repo without .cq/config.json
+        let dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+
+        // Create a subdirectory to resolve from
+        let sub = dir.path().join("subdir");
+        fs::create_dir_all(&sub).unwrap();
+
+        let result = resolve_project_root(&sub);
+        // Should resolve to the git repo root, not the subdir
+        let canonical_dir = fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(result, canonical_dir);
+    }
+
+    #[test]
+    fn test_resolve_project_root_local_config_beats_worktree_parent() {
+        // Create a main repo with .cq/config.json
+        let main_dir = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(main_dir.path())
+            .output()
+            .unwrap();
+        // Need an initial commit for worktrees
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(main_dir.path())
+            .output()
+            .unwrap();
+        let main_cq = main_dir.path().join(".cq");
+        fs::create_dir_all(&main_cq).unwrap();
+        fs::write(main_cq.join("config.json"), r#"{"timeout": 999}"#).unwrap();
+
+        // Create a worktree
+        let wt_dir = tempfile::tempdir().unwrap();
+        let wt_path = wt_dir.path().join("wt");
+        Command::new("git")
+            .args([
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "wt-branch",
+            ])
+            .current_dir(main_dir.path())
+            .output()
+            .unwrap();
+
+        // Without local config, worktree should resolve to main repo
+        let canonical_main = fs::canonicalize(main_dir.path()).unwrap();
+        assert_eq!(resolve_project_root(&wt_path), canonical_main);
+
+        // Now add a local .cq/config.json in the worktree — it should win
+        let wt_cq = wt_path.join(".cq");
+        fs::create_dir_all(&wt_cq).unwrap();
+        fs::write(wt_cq.join("config.json"), r#"{"timeout": 111}"#).unwrap();
+        assert_eq!(resolve_project_root(&wt_path), wt_path);
+    }
+
+    #[test]
+    fn test_resolve_project_root_non_git_dir() {
+        // A temp dir with no git repo and no .cq/config.json — should return cwd
+        let dir = tempfile::tempdir().unwrap();
+        let result = resolve_project_root(dir.path());
+        assert_eq!(result, dir.path());
     }
 }
