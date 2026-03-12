@@ -1,5 +1,8 @@
 # cq (claude-queue)
 
+[![CI](https://github.com/wiggzz/claude-queue/actions/workflows/ci.yml/badge.svg)](https://github.com/wiggzz/claude-queue/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Orchestrate multiple Claude Code sessions from a single place.
 
 ## Install
