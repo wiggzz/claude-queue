@@ -126,3 +126,4 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Audit log: show session names instead of IDs~~
 - ~~Audit log: show bash command contents~~
 - ~~Audit log: show tool call details inline (`--verbose` flag)~~
+- ~~Bug: `cq result` returns resume response instead of original session output~~
