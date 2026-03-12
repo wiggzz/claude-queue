@@ -83,8 +83,10 @@ pub fn evaluate(
             "--output-format", "json",
             "--model", &config.model,
             "--max-turns", "1",
+            "--no-session-persistence",
             &prompt,
         ])
+        .env_remove("CLAUDECODE")
         .output();
 
     let output = match output {
@@ -96,8 +98,10 @@ pub fn evaluate(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let code = output.status.code().map(|c| c.to_string()).unwrap_or("signal".into());
         return Ok(Decision::Escalate(format!(
-            "Supervisor process failed: {stderr}"
+            "Supervisor process failed (exit {code}): stderr={stderr} stdout={}", &stdout[..stdout.len().min(1000)]
         )));
     }
 
@@ -130,19 +134,42 @@ fn extract_text_from_claude_output(output: &str) -> String {
     if let Ok(val) = serde_json::from_str::<serde_json::Value>(output) {
         // Claude CLI format: {"result": "...text..."}
         if let Some(result) = val.get("result").and_then(|v| v.as_str()) {
-            return result.trim().to_string();
+            return strip_markdown_fencing(result.trim());
         }
         // Alternative: array of content blocks
         if let Some(result) = val.get("result").and_then(|v| v.as_array()) {
             for block in result {
                 if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                     if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                        return text.trim().to_string();
+                        return strip_markdown_fencing(text.trim());
                     }
                 }
             }
         }
     }
     // Fallback: use raw output
-    output.trim().to_string()
+    strip_markdown_fencing(output.trim())
+}
+
+/// Strip markdown code fencing (```json ... ```) from LLM responses.
+fn strip_markdown_fencing(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.starts_with("```") {
+        // Remove opening fence (```json or ```)
+        let after_open = if let Some(newline_pos) = trimmed.find('\n') {
+            &trimmed[newline_pos + 1..]
+        } else {
+            return trimmed.to_string();
+        };
+        // Remove closing fence
+        let content = if after_open.trim_end().ends_with("```") {
+            let end = after_open.rfind("```").unwrap_or(after_open.len());
+            &after_open[..end]
+        } else {
+            after_open
+        };
+        content.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }

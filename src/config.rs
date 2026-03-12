@@ -11,7 +11,7 @@ pub struct Policy {
     pub pattern: Option<String>, // regex pattern to match against tool_input (e.g. Bash command)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -19,6 +19,16 @@ pub struct SupervisorConfig {
     pub model: String,
     #[serde(default)]
     pub rules: Vec<String>,
+}
+
+impl Default for SupervisorConfig {
+    fn default() -> Self {
+        SupervisorConfig {
+            enabled: false,
+            model: default_supervisor_model(),
+            rules: Vec::new(),
+        }
+    }
 }
 
 fn default_supervisor_model() -> String {

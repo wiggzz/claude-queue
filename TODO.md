@@ -1,29 +1,9 @@
 # cq Backlog
 
-## Pending --wait: long-polling for approvals
-**Priority:** High — needed for orchestrator use case
+## Bug: pending --wait ignores already-pending calls
+**Priority:** High — usability bug
 
-`cq pending --wait` blocks until a new pending tool call appears, prints it, exits.
-- Scoped variant: `cq pending --wait --session <id>`
-- Could use fs watching on the DB or internal poll
-- Enables event-driven orchestrator loop instead of shell polling
-
-## Pending show: full tool call detail view
-**Priority:** High — safety gap
-
-`cq pending show <id>` displays complete tool call input (untruncated JSON).
-- Current table view truncates input, making it hard to safely review Bash commands
-- Alternative: `cq pending --full` to show all pending with full input
-
-## List: filter by session name
-**Priority:** Medium — convenience
-
-`cq list --session <name>` to filter the list view. Tried `cq list --session cq-discover` and got an unexpected argument error. Should support filtering by name or ID prefix.
-
-## Pending: show which file is being written
-**Priority:** Medium — safety context
-
-For Write/Edit tool calls, `cq pending` should show the `file_path` prominently (not buried in truncated JSON). Knowing *what file* is being written is often enough to approve without needing the full content.
+`cq pending --wait` only watches for *new* pending calls. If there are already pending calls when `--wait` starts, they're silently ignored. It should print existing pending calls immediately and only enter the poll loop if the queue is empty. Discovered while using `--wait` to monitor a cq agent — a pending Bash call sat unnoticed.
 
 ## Supervisor agent for approval loop
 **Priority:** High — key UX unlock
@@ -41,24 +21,44 @@ Design:
 
 This collapses the manual approve-poll loop into something ~95% autonomous. The user only gets pulled in for real decisions.
 
-Depends on: `pending --wait`, `pending show <id>` (supervisor needs full tool call details)
+Depends on: `pending --wait`, `pending show <id>` (supervisor needs full tool call details) — both now implemented.
 
-## Approve all scoped to session
-**Priority:** Medium — usability
+## Batch approve by tool type
+**Priority:** High — needed for orchestrator workflow
 
-`cq approve all --session <name-or-id>` to bulk-approve all *currently pending* calls for a specific session only. Current `cq approve all` is too broad — it approves across all sessions.
+`cq approve all --tool Bash` or `cq approve all --tool "Bash,Agent"` to approve all pending calls matching specific tool types. When managing 8 parallel agents, most pending calls are `cargo build` or `git diff` — approving by tool type is faster than reviewing each one individually.
 
-## Resume is broken
-**Priority:** High — bug
+Could combine with `--session` for even more control: `cq approve all --session auth-fix --tool Bash`.
 
-`cq resume <name>` fails with "No conversation found with session ID: <original-id>". The resumed `claude --resume` process can't find the original session transcript. Likely a mismatch between how cq tracks session IDs and where Claude Code stores JSONL transcripts.
+## Pending --wait: emit JSON mode
+**Priority:** Medium — automation
 
-## Result/output broken for resumed sessions
-**Priority:** High — bug
+`cq pending --wait --json` to output new pending calls as JSON instead of table format. Makes it easier for scripts and supervisor agents to parse tool call details programmatically.
 
-`cq result <name>` after a resume looks up the original session ID, not the new one. Also `cq output` returns nothing for failed sessions. Need better error surfacing.
+## Session status notification
+**Priority:** Medium — UX
 
-## Policy: conditional Bash approval
-**Priority:** Low — stretch goal
+`cq wait <name-or-id>` blocks until a session completes, then prints its status and result. Useful for orchestrators that need to know when an agent finishes before proceeding (e.g., waiting for dependencies before starting the supervisor agent).
 
-Currently Bash is all-or-nothing in policies. Would be useful to have patterns, e.g. auto-approve Bash commands matching `ls`, `tree`, `find`, `cat` but gate `rm`, `git push`, `cargo install`, etc.
+## Approve with regex filter
+**Priority:** Medium — power user
+
+`cq approve all --match "cargo (build|test)"` to approve all pending Bash calls whose command matches a regex. More surgical than `--tool` filtering and doesn't require a persistent policy.
+
+## Policy add with pattern from CLI
+**Priority:** Low — convenience
+
+`cq policy add Bash allow --pattern "^(ls|tree|cargo build|cargo test)"` to add conditional policies directly from the CLI instead of editing config.json. The `pattern` field is already supported in config but there's no CLI flag for it yet.
+
+---
+
+## Done
+
+- ~~Pending --wait: long-polling for approvals~~
+- ~~Pending show: full tool call detail view~~
+- ~~List: filter by session name~~
+- ~~Pending: show which file is being written~~
+- ~~Approve all scoped to session~~
+- ~~Resume is broken~~
+- ~~Result/output broken for resumed sessions~~
+- ~~Policy: conditional Bash approval~~
