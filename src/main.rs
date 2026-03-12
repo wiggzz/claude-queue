@@ -41,6 +41,34 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         Commands::Start { prompt, name, cwd } => {
+            // If a name is provided, check for an existing session with that name
+            if let Some(ref session_name) = name {
+                let db = open_db()?;
+                if let Some(existing) = db.find_session(session_name)? {
+                    // Only match by exact name, not prefix
+                    if existing.name.as_deref() == Some(session_name) {
+                        let alive = existing.pid.map(session::is_pid_alive).unwrap_or(false);
+                        let status = if existing.status == "running" && !alive {
+                            // PID is dead but DB still says running — resolve it
+                            session::resolve_dead_session(&db, &existing.session_id)
+                        } else {
+                            existing.status.clone()
+                        };
+
+                        if status == "running" {
+                            return Err(format!(
+                                "Session '{}' is already running. Use `cq resume {}` to queue a follow-up.",
+                                session_name, session_name
+                            ).into());
+                        }
+                        // Session exists and is completed/failed — auto-resume
+                        let new_session_id = session::resume(session_name, &prompt, &cwd)?;
+                        println!("Resuming existing session: {session_name} ({new_session_id})");
+                        return Ok(());
+                    }
+                }
+            }
+
             let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
             let display = name.as_deref().unwrap_or(&session_id[..8]);
             println!("Started session: {display} ({session_id})");
