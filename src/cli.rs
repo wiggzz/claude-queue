@@ -177,6 +177,18 @@ pub enum Commands {
         #[arg(long, short)]
         verbose: bool,
     },
+    /// Clean up dead sessions and old data
+    Gc {
+        /// Remove sessions older than this duration (e.g. "7d", "24h", "30d"). Default: only resolve dead processes.
+        #[arg(long)]
+        older_than: Option<String>,
+        /// Only remove sessions with these statuses (comma-separated, default: completed,failed,killed)
+        #[arg(long)]
+        status: Option<String>,
+        /// Dry run: show what would be removed without actually removing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Update cq to the latest release from GitHub
     Update,
     /// Print the current version

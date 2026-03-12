@@ -28,6 +28,69 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Commands::Gc {
+            older_than,
+            status,
+            dry_run,
+        } => {
+            let db = open_db()?;
+
+            // Part 1: Always resolve dead processes
+            let running = db.get_running_sessions()?;
+            let mut resolved_count = 0;
+            for s in &running {
+                let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
+                    let new_status = session::resolve_dead_session(&db, &s.session_id);
+                    let display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
+                    eprintln!("  Resolved dead session {display} -> {new_status}");
+                    resolved_count += 1;
+                }
+            }
+            println!("Resolved {resolved_count} dead session(s).");
+
+            // Part 2: If --older-than provided, prune old sessions
+            if let Some(ref duration_str) = older_than {
+                let seconds = parse_duration(duration_str)?;
+                let cutoff = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    - seconds;
+                // Format as SQLite datetime string
+                let dt = time_to_sqlite_datetime(cutoff);
+
+                let statuses_str = status
+                    .as_deref()
+                    .unwrap_or("completed,failed,killed");
+                let status_list: Vec<&str> = statuses_str.split(',').map(|s| s.trim()).collect();
+
+                if dry_run {
+                    let count = db.count_sessions_older_than(&dt, &status_list)?;
+                    println!(
+                        "Would remove {count} session(s) older than {duration_str} with status in [{statuses_str}]."
+                    );
+                } else {
+                    // Get session IDs before deleting so we can clean up log files
+                    let session_ids = db.get_session_ids_older_than(&dt, &status_list)?;
+                    let count = db.delete_sessions_older_than(&dt, &status_list)?;
+
+                    // Clean up log files
+                    let log_dir = config::log_dir();
+                    for sid in &session_ids {
+                        let log_path = log_dir.join(format!("{sid}.log"));
+                        let stderr_path = log_dir.join(format!("{sid}.stderr"));
+                        let _ = std::fs::remove_file(&log_path);
+                        let _ = std::fs::remove_file(&stderr_path);
+                    }
+
+                    println!(
+                        "Removed {count} session(s) older than {duration_str} with status in [{statuses_str}]."
+                    );
+                }
+            }
+        }
+
         Commands::Update => {
             update::run()?;
         }
@@ -968,6 +1031,57 @@ fn print_approved_details(
     }
 }
 
+/// Parse a duration string like "7d", "24h", "30m" into seconds.
+fn parse_duration(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty duration string".into());
+    }
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid duration: '{s}'. Expected format like '7d', '24h', '30m'"))?;
+    let multiplier = match unit {
+        "d" => 86400,
+        "h" => 3600,
+        "m" => 60,
+        _ => {
+            return Err(format!(
+                "Unknown duration unit '{unit}' in '{s}'. Use 'd' (days), 'h' (hours), or 'm' (minutes)"
+            )
+            .into())
+        }
+    };
+    Ok(num * multiplier)
+}
+
+/// Convert a Unix timestamp to a SQLite datetime string (UTC).
+fn time_to_sqlite_datetime(unix_secs: u64) -> String {
+    // Manual conversion from unix timestamp to datetime components
+    // Using a simple algorithm for UTC datetime
+    let secs = unix_secs as i64;
+    let days = secs / 86400;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    // Days since epoch (1970-01-01) to date
+    // Using a well-known algorithm for civil date from days
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64; // day of era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}-{m:02}-{d:02} {hours:02}:{minutes:02}:{seconds:02}")
+}
+
 fn tool_call_to_json(tc: &db::ToolCall) -> String {
     let tool_input = serde_json::from_str::<serde_json::Value>(&tc.tool_input)
         .unwrap_or_else(|_| serde_json::Value::String(tc.tool_input.clone()));
@@ -982,4 +1096,56 @@ fn tool_call_to_json(tc: &db::ToolCall) -> String {
         obj["summary"] = serde_json::Value::String(summary.clone());
     }
     serde_json::to_string(&obj).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_days() {
+        assert_eq!(parse_duration("7d").unwrap(), 7 * 86400);
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(parse_duration("24h").unwrap(), 24 * 3600);
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(parse_duration("30m").unwrap(), 30 * 60);
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_unit() {
+        assert!(parse_duration("7x").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_number() {
+        assert!(parse_duration("abcd").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_empty() {
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_time_to_sqlite_datetime_epoch() {
+        assert_eq!(time_to_sqlite_datetime(0), "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_time_to_sqlite_datetime_known_date() {
+        // 2025-01-01 00:00:00 UTC = 1735689600
+        assert_eq!(time_to_sqlite_datetime(1735689600), "2025-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_time_to_sqlite_datetime_with_time() {
+        // 2024-06-15 13:30:45 UTC = 1718458245
+        assert_eq!(time_to_sqlite_datetime(1718458245), "2024-06-15 13:30:45");
+    }
 }

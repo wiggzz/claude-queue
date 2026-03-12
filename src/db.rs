@@ -302,6 +302,80 @@ impl Db {
         Ok(changed)
     }
 
+    /// Get all sessions with status "running"
+    pub fn get_running_sessions(&self) -> rusqlite::Result<Vec<Session>> {
+        let sql = format!("SELECT {SESSION_COLS} FROM sessions WHERE status = 'running'");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], map_session)?;
+        rows.collect()
+    }
+
+    /// Count sessions older than a given datetime, filtered by statuses
+    pub fn count_sessions_older_than(&self, before: &str, statuses: &[&str]) -> rusqlite::Result<usize> {
+        if statuses.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<String> = statuses.iter().enumerate().map(|(i, _)| format!("?{}", i + 2)).collect();
+        let sql = format!(
+            "SELECT COUNT(*) FROM sessions WHERE started_at < ?1 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        params_vec.push(Box::new(before.to_string()));
+        for s in statuses {
+            params_vec.push(Box::new(s.to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let count: usize = stmt.query_row(refs.as_slice(), |row| row.get(0))?;
+        Ok(count)
+    }
+
+    /// Get session IDs older than a given datetime, filtered by statuses
+    pub fn get_session_ids_older_than(&self, before: &str, statuses: &[&str]) -> rusqlite::Result<Vec<String>> {
+        if statuses.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders: Vec<String> = statuses.iter().enumerate().map(|(i, _)| format!("?{}", i + 2)).collect();
+        let sql = format!(
+            "SELECT session_id FROM sessions WHERE started_at < ?1 AND status IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        params_vec.push(Box::new(before.to_string()));
+        for s in statuses {
+            params_vec.push(Box::new(s.to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), |row| row.get::<_, String>(0))?;
+        rows.collect()
+    }
+
+    /// Delete sessions older than a given datetime, filtered by statuses.
+    /// Also deletes associated tool_calls. Returns the number of sessions deleted.
+    pub fn delete_sessions_older_than(&self, before: &str, statuses: &[&str]) -> rusqlite::Result<usize> {
+        let session_ids = self.get_session_ids_older_than(before, statuses)?;
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        // Delete tool_calls for these sessions
+        for sid in &session_ids {
+            self.conn.execute(
+                "DELETE FROM tool_calls WHERE session_id = ?1",
+                params![sid],
+            )?;
+        }
+        // Delete the sessions themselves
+        for sid in &session_ids {
+            self.conn.execute(
+                "DELETE FROM sessions WHERE session_id = ?1",
+                params![sid],
+            )?;
+        }
+        Ok(session_ids.len())
+    }
+
     fn map_tool_call(row: &rusqlite::Row) -> rusqlite::Result<ToolCall> {
         Ok(ToolCall {
             id: row.get(0)?,
@@ -551,6 +625,56 @@ mod tests {
             .unwrap();
         let results = db.find_pending_by_summary("Pushes branch").unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_get_running_sessions() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "p1", "/tmp", 1).unwrap();
+        db.create_session("s2", None, None, "p2", "/tmp", 2).unwrap();
+        db.update_session_status("s1", "completed", Some(0)).unwrap();
+        let running = db.get_running_sessions().unwrap();
+        assert_eq!(running.len(), 1);
+        assert_eq!(running[0].session_id, "s2");
+    }
+
+    #[test]
+    fn test_count_sessions_older_than() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "p1", "/tmp", 1).unwrap();
+        db.update_session_status("s1", "completed", Some(0)).unwrap();
+        // All sessions created "now" in SQLite, so a future cutoff should match them
+        let count = db.count_sessions_older_than("9999-12-31 23:59:59", &["completed"]).unwrap();
+        assert_eq!(count, 1);
+        // A past cutoff should match nothing
+        let count = db.count_sessions_older_than("2000-01-01 00:00:00", &["completed"]).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_delete_sessions_older_than() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "p1", "/tmp", 1).unwrap();
+        db.update_session_status("s1", "completed", Some(0)).unwrap();
+        db.insert_tool_call("s1", "Bash", "cmd").unwrap();
+        db.create_session("s2", None, None, "p2", "/tmp", 2).unwrap();
+        // Delete completed sessions with a future cutoff (should delete s1)
+        let deleted = db.delete_sessions_older_than("9999-12-31 23:59:59", &["completed"]).unwrap();
+        assert_eq!(deleted, 1);
+        // s2 should still exist (status is "running", not in filter)
+        let sessions = db.get_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, "s2");
+        // Tool calls for s1 should also be gone
+        assert!(db.get_tool_call_by_id(1).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_delete_sessions_empty_statuses() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "p1", "/tmp", 1).unwrap();
+        let deleted = db.delete_sessions_older_than("9999-12-31 23:59:59", &[]).unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[test]
