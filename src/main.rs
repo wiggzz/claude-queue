@@ -701,9 +701,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Audit { tail, json, follow } => {
+        Commands::Audit {
+            tail,
+            json,
+            follow,
+            verbose,
+        } => {
             if follow {
-                audit::follow(tail, json);
+                audit::follow(tail, json, verbose);
             } else {
                 let entries = audit::read_tail(tail);
                 if entries.is_empty() {
@@ -723,7 +728,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "TIMESTAMP", "DECISION", "ACTOR", "TOOL", "SESSION"
                     );
                     for entry in &entries {
-                        audit::print_entry(entry, false, &session_names);
+                        audit::print_entry(entry, false, &session_names, verbose);
                     }
                 }
             }

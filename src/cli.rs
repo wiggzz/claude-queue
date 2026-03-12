@@ -170,6 +170,9 @@ pub enum Commands {
         /// Follow the audit log in real-time (like tail -f)
         #[arg(long, short)]
         follow: bool,
+        /// Show full tool call details (command, file path, input)
+        #[arg(long, short)]
+        verbose: bool,
     },
     /// Update cq to the latest release from GitHub
     Update,

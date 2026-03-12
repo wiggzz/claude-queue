@@ -93,7 +93,7 @@ fn days_to_ymd(days_since_epoch: u64) -> (u64, u64, u64) {
 
 /// Follow the audit log in real-time, printing new entries as they appear.
 /// Prints the last `tail` entries first, then polls for new lines every 500ms.
-pub fn follow(tail: usize, json: bool) {
+pub fn follow(tail: usize, json: bool, verbose: bool) {
     use std::io::{Seek, SeekFrom};
 
     let path = config::log_dir().join("audit.log");
@@ -109,7 +109,7 @@ pub fn follow(tail: usize, json: bool) {
             );
         }
         for entry in &entries {
-            print_entry(entry, json, &session_names);
+            print_entry(entry, json, &session_names, verbose);
         }
     }
 
@@ -163,7 +163,7 @@ pub fn follow(tail: usize, json: bool) {
                     );
                     header_printed = true;
                 }
-                print_entry(&entry, json, &session_names);
+                print_entry(&entry, json, &session_names, verbose);
             }
         }
     }
@@ -188,9 +188,39 @@ fn session_display(session_id: &str, names: &HashMap<String, String>) -> String 
     }
 }
 
-pub fn print_entry(entry: &AuditEntry, json: bool, session_names: &HashMap<String, String>) {
+pub fn print_entry(
+    entry: &AuditEntry,
+    json: bool,
+    session_names: &HashMap<String, String>,
+    verbose: bool,
+) {
     if json {
         println!("{}", serde_json::to_string(entry).unwrap());
+    } else if verbose {
+        let session_short = session_display(&entry.session_id, session_names);
+        println!(
+            "{:<22} {:<10} {:<10} {:<15} {:<10} {}",
+            &entry.timestamp,
+            entry.decision,
+            entry.actor,
+            entry.tool_name,
+            session_short,
+            &entry.reason,
+        );
+        if !entry.tool_input.is_empty() {
+            // Pretty-print JSON tool input, fall back to raw string
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&entry.tool_input) {
+                if let Ok(pretty) = serde_json::to_string_pretty(&v) {
+                    for line in pretty.lines() {
+                        println!("  {line}");
+                    }
+                } else {
+                    println!("  {}", entry.tool_input);
+                }
+            } else {
+                println!("  {}", entry.tool_input);
+            }
+        }
     } else {
         let session_short = session_display(&entry.session_id, session_names);
         let reason_short = if entry.reason.len() > 40 {
@@ -209,7 +239,6 @@ pub fn print_entry(entry: &AuditEntry, json: bool, session_names: &HashMap<Strin
             reason_short,
         );
         if tool_display != entry.tool_input {
-            // Tool input was formatted specially (Bash command, file path, etc.)
             println!("  {tool_display}");
         } else if !entry.tool_input.is_empty() {
             let input_short = if entry.tool_input.len() > 80 {
