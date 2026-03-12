@@ -44,6 +44,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             prompt,
             name,
             cwd,
+            new,
             cancel,
         } => {
             if cancel {
@@ -57,25 +58,47 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     eprintln!("No session found with name '{name}'");
                     std::process::exit(1);
                 }
-            } else if let Some(ref name) = name {
-                let db = open_db()?;
-                // Check if there's already a running session with this name
-                let sessions = db.find_sessions_by_name(name)?;
-                let has_running = sessions.iter().any(|s| {
-                    if s.status != "running" {
-                        return false;
+            } else if let Some(ref session_name) = name {
+                if !new {
+                    let db = open_db()?;
+                    if let Some(existing) = db.find_session(session_name)? {
+                        // Check actual liveness for "running" sessions
+                        let actual_status = if existing.status == "running" {
+                            let alive =
+                                existing.pid.map(session::is_pid_alive).unwrap_or(false);
+                            if !alive {
+                                session::resolve_dead_session(&db, &existing.session_id)
+                            } else {
+                                existing.status.clone()
+                            }
+                        } else {
+                            existing.status.clone()
+                        };
+
+                        match actual_status.as_str() {
+                            "completed" | "failed" => {
+                                drop(db);
+                                let new_session_id =
+                                    session::resume(&existing.session_id, &prompt, &cwd)?;
+                                println!(
+                                    "Resumed session: {session_name} ({new_session_id})"
+                                );
+                                return Ok(());
+                            }
+                            "running" => {
+                                // Queue the prompt for delivery when the session completes
+                                db.queue_prompt(session_name, &prompt)?;
+                                println!("Queued prompt for session {session_name} (will deliver on completion)");
+                                return Ok(());
+                            }
+                            _ => {
+                                // Unknown status, fall through to start a new session
+                            }
+                        }
                     }
-                    s.pid.map(session::is_pid_alive).unwrap_or(false)
-                });
-                if has_running {
-                    // Queue the prompt instead of starting a new session
-                    db.queue_prompt(name, &prompt)?;
-                    println!("Queued prompt for session {name} (will deliver on completion)");
-                } else {
-                    drop(db);
-                    let session_id = session::start(&prompt, Some(name.as_str()), &cwd)?;
-                    println!("Started session: {name} ({session_id})");
                 }
+                let session_id = session::start(&prompt, Some(session_name.as_str()), &cwd)?;
+                println!("Started session: {session_name} ({session_id})");
             } else {
                 let session_id = session::start(&prompt, None, &cwd)?;
                 let display = &session_id[..8];

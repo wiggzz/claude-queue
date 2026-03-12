@@ -49,10 +49,11 @@ pub struct Cli {
 pub enum Commands {
     /// Start a new sub-agent: cq start "your prompt here" [--name my-task] [--cwd DIR]
     ///
-    /// If --name is provided and a session with that name is already running,
-    /// the prompt is queued and will be delivered as a resume when the session completes.
-    /// A second queued prompt replaces the first (at most one pending follow-up per name).
-    /// Use --cancel to cancel a queued-but-not-yet-delivered prompt.
+    /// If --name is given and a session with that name already exists:
+    /// - completed/failed: auto-resumes with the new prompt (preserving context)
+    /// - running: queues the prompt for delivery when the session completes
+    /// A second queued prompt replaces the first (at most one pending follow-up).
+    /// Use --new to force a fresh session, --cancel to cancel a queued prompt.
     Start {
         /// The prompt to send to the sub-agent
         prompt: String,
@@ -62,6 +63,9 @@ pub enum Commands {
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Force a new session even if one with this name already exists
+        #[arg(long)]
+        new: bool,
         /// Cancel a queued prompt for the named session (requires --name)
         #[arg(long)]
         cancel: bool,
