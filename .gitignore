@@ -1,4 +1,5 @@
 /target
 .cq/*
 !.cq/config.json
+.claude/
 .DS_Store
