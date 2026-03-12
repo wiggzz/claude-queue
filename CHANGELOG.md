@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/wiggzz/claude-queue/compare/v0.2.0...v0.3.0) (2026-03-12)
+
+
+### Features
+
+* add --verbose flag to cq audit for full tool call details ([#12](https://github.com/wiggzz/claude-queue/issues/12)) ([8c962f9](https://github.com/wiggzz/claude-queue/commit/8c962f9d385ff2d1b2560023dfdff64fdb788e5e))
+* derive cq policies from Claude Code permission settings ([#7](https://github.com/wiggzz/claude-queue/issues/7)) ([fe99dc7](https://github.com/wiggzz/claude-queue/commit/fe99dc7e937dd3e069b71d9a96fa5009a37fcec0))
+
+
+### Bug Fixes
+
+* concatenate outputs from resumed sessions in cq result ([#10](https://github.com/wiggzz/claude-queue/issues/10)) ([344e8f6](https://github.com/wiggzz/claude-queue/commit/344e8f6a512cb267cb3109e8c1d4a7071a1075b4))
+* omit agent session prompt from supervisor context by default ([#6](https://github.com/wiggzz/claude-queue/issues/6)) ([739e6e8](https://github.com/wiggzz/claude-queue/commit/739e6e82b0c3d44e4141d64a97f3cb0259b07e64))
+* resolve project root from git worktrees for config loading ([#8](https://github.com/wiggzz/claude-queue/issues/8)) ([60b61af](https://github.com/wiggzz/claude-queue/commit/60b61afa438ee33a2d1115012e505b8af690be68))
+* use RELEASE_PLEASE_TOKEN for release-please action ([#15](https://github.com/wiggzz/claude-queue/issues/15)) ([7863679](https://github.com/wiggzz/claude-queue/commit/7863679521f8757f7d8603c3a6017db12254f846))
+
 ## [0.2.0](https://github.com/wiggzz/claude-queue/compare/v0.1.0...v0.2.0) (2026-03-12)
 
 
