@@ -439,30 +439,49 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Result { session_id } => {
             let db = open_db()?;
-            let sess = db
-                .find_session(&session_id)?
-                .ok_or_else(|| format!("No session matching '{session_id}'"))?;
 
-            // Resolve status if the process died without updating DB
-            let status = if sess.status == "running" {
-                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
-                if !alive {
-                    session::resolve_dead_session(&db, &sess.session_id)
-                } else {
-                    sess.status.clone()
-                }
+            // If multiple sessions share a name, concatenate all their outputs
+            let sessions_by_name = db.find_sessions_by_name(&session_id)?;
+            let sessions = if sessions_by_name.len() > 1 {
+                sessions_by_name
             } else {
-                sess.status.clone()
+                let sess = db
+                    .find_session(&session_id)?
+                    .ok_or_else(|| format!("No session matching '{session_id}'"))?;
+                vec![sess]
             };
 
-            let content = session::get_output(&sess.session_id)?;
-            let trimmed = content.trim();
-            if trimmed.is_empty() {
-                let stderr = session::get_stderr(&sess.session_id).unwrap_or_default();
+            let last_sess = sessions.last().unwrap();
+
+            // Resolve status of the most recent session
+            let status = if last_sess.status == "running" {
+                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
+                    session::resolve_dead_session(&db, &last_sess.session_id)
+                } else {
+                    last_sess.status.clone()
+                }
+            } else {
+                last_sess.status.clone()
+            };
+
+            let mut parts = Vec::new();
+            for sess in &sessions {
+                if let Ok(content) = session::get_output(&sess.session_id) {
+                    let trimmed = content.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+            }
+            let combined = parts.join("\n\n--- resumed ---\n\n");
+
+            if combined.is_empty() {
+                let stderr = session::get_stderr(&last_sess.session_id).unwrap_or_default();
                 if !stderr.trim().is_empty() {
                     eprintln!(
                         "Session {} ({}):\n{}",
-                        &sess.session_id[..8],
+                        &last_sess.session_id[..8],
                         status,
                         stderr.trim()
                     );
@@ -472,32 +491,43 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     println!("(no output — session {})", status);
                 }
             } else {
-                println!("{trimmed}");
+                println!("{combined}");
             }
         }
 
         Commands::Output { session_id, follow } => {
             let db = open_db()?;
-            let sess = db
-                .find_session(&session_id)?
-                .ok_or_else(|| format!("No session matching '{session_id}'"))?;
 
-            // Resolve status if the process died without updating DB
-            let status = if sess.status == "running" {
-                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
+            // If multiple sessions share a name, concatenate all their outputs
+            let sessions_by_name = db.find_sessions_by_name(&session_id)?;
+            let sessions = if sessions_by_name.len() > 1 {
+                sessions_by_name
+            } else {
+                let sess = db
+                    .find_session(&session_id)?
+                    .ok_or_else(|| format!("No session matching '{session_id}'"))?;
+                vec![sess]
+            };
+
+            let last_sess = sessions.last().unwrap();
+
+            // Resolve status of the most recent session
+            let status = if last_sess.status == "running" {
+                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
                 if !alive {
-                    session::resolve_dead_session(&db, &sess.session_id)
+                    session::resolve_dead_session(&db, &last_sess.session_id)
                 } else {
-                    sess.status.clone()
+                    last_sess.status.clone()
                 }
             } else {
-                sess.status.clone()
+                last_sess.status.clone()
             };
 
             if follow {
+                // For follow mode, only tail the most recent session
                 let mut last_len = 0;
                 loop {
-                    let content = session::get_output(&sess.session_id)?;
+                    let content = session::get_output(&last_sess.session_id)?;
                     if content.len() > last_len {
                         print!("{}", &content[last_len..]);
                         last_len = content.len();
@@ -505,13 +535,22 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
             } else {
-                let content = session::get_output(&sess.session_id)?;
-                if content.is_empty() {
-                    let stderr = session::get_stderr(&sess.session_id).unwrap_or_default();
+                let mut parts = Vec::new();
+                for sess in &sessions {
+                    if let Ok(content) = session::get_output(&sess.session_id)
+                        && !content.is_empty()
+                    {
+                        parts.push(content);
+                    }
+                }
+                let combined = parts.join("\n--- resumed ---\n");
+
+                if combined.is_empty() {
+                    let stderr = session::get_stderr(&last_sess.session_id).unwrap_or_default();
                     if !stderr.trim().is_empty() {
                         eprintln!(
                             "Session {} ({}):\n{}",
-                            &sess.session_id[..8],
+                            &last_sess.session_id[..8],
                             status,
                             stderr.trim()
                         );
@@ -521,7 +560,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         println!("(no output — session {})", status);
                     }
                 } else {
-                    print!("{content}");
+                    print!("{combined}");
                 }
             }
         }
