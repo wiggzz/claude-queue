@@ -1,5 +1,6 @@
 use crate::config;
 use crate::db::Db;
+use crate::format;
 use crate::session;
 use std::io::Write;
 
@@ -54,11 +55,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("  {:<6} {:<10} {:<15} {:<20} {}",
                 "ID", "SESSION", "TOOL", "SINCE", "INPUT");
             for tc in &pending {
-                let input_short = if tc.tool_input.len() > 40 {
-                    format!("{}...", &tc.tool_input[..37])
-                } else {
-                    tc.tool_input.clone()
-                };
+                let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 40);
                 println!("  {:<6} {:<10} {:<15} {:<20} {}",
                     tc.id,
                     &tc.session_id[..8.min(tc.session_id.len())],

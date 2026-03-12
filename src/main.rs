@@ -2,6 +2,7 @@ mod cli;
 mod config;
 mod db;
 mod discover;
+mod format;
 mod hook;
 mod policy;
 mod session;
@@ -87,11 +88,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{:<6} {:<10} {:<15} {:<20} {}",
                 "ID", "SESSION", "TOOL", "SINCE", "INPUT");
             for tc in &pending {
-                let input_short = if tc.tool_input.len() > 60 {
-                    format!("{}...", &tc.tool_input[..57])
-                } else {
-                    tc.tool_input.clone()
-                };
+                let input_short = format::format_tool_input(&tc.tool_name, &tc.tool_input, 60);
                 println!("{:<6} {:<10} {:<15} {:<20} {}",
                     tc.id,
                     &tc.session_id[..8.min(tc.session_id.len())],
@@ -390,3 +387,4 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn open_db() -> Result<db::Db, Box<dyn std::error::Error>> {
     Ok(db::Db::open(&config::db_path())?)
 }
+
