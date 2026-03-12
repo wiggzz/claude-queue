@@ -257,15 +257,15 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
         let pattern_str = rest.strip_suffix(')')?;
 
         // Handle WebFetch(domain:X) — domain matching mode
-        if tool == "WebFetch" {
-            if let Some(domain) = pattern_str.strip_prefix("domain:") {
-                return Some(Policy {
-                    tool: tool.to_string(),
-                    action: action.to_string(),
-                    pattern: Some(domain.to_string()),
-                    match_mode: MatchMode::Domain,
-                });
-            }
+        if tool == "WebFetch"
+            && let Some(domain) = pattern_str.strip_prefix("domain:")
+        {
+            return Some(Policy {
+                tool: tool.to_string(),
+                action: action.to_string(),
+                pattern: Some(domain.to_string()),
+                match_mode: MatchMode::Domain,
+            });
         }
 
         // For path-based tools, strip leading // (Claude Code's absolute path convention)

@@ -84,10 +84,7 @@ fn extract_json_field(tool_input: &str, field: &str) -> Option<String> {
 /// Matches if the host equals the domain or ends with ".{domain}".
 fn matches_domain(url: &str, domain: &str) -> bool {
     // Extract host from URL: skip scheme, take up to next / or :
-    let after_scheme = url
-        .find("://")
-        .map(|i| &url[i + 3..])
-        .unwrap_or(url);
+    let after_scheme = url.find("://").map(|i| &url[i + 3..]).unwrap_or(url);
     let host = after_scheme
         .split(['/', ':', '?', '#'])
         .next()
@@ -253,7 +250,8 @@ mod tests {
     fn test_edit_matches_file_path() {
         let policies = vec![policy("Edit", "allow", Some(r"^/Users/wtj/"))];
 
-        let input = r#"{"file_path": "/Users/wtj/code/main.rs", "old_string": "x", "new_string": "y"}"#;
+        let input =
+            r#"{"file_path": "/Users/wtj/code/main.rs", "old_string": "x", "new_string": "y"}"#;
         assert_eq!(check("Edit", input, &policies), Some("allow".into()));
 
         let input2 = r#"{"file_path": "/tmp/evil.sh", "old_string": "x", "new_string": "y"}"#;
@@ -276,10 +274,7 @@ mod tests {
         let policies = vec![policy("WebFetch", "allow", Some(r"^https://docs\.rs/"))];
 
         let input = r#"{"url": "https://docs.rs/serde/latest"}"#;
-        assert_eq!(
-            check("WebFetch", input, &policies),
-            Some("allow".into())
-        );
+        assert_eq!(check("WebFetch", input, &policies), Some("allow".into()));
 
         let input2 = r#"{"url": "https://evil.com/payload"}"#;
         assert_eq!(check("WebFetch", input2, &policies), None);
@@ -291,17 +286,11 @@ mod tests {
 
         // Exact match
         let input = r#"{"url": "https://example.com/path"}"#;
-        assert_eq!(
-            check("WebFetch", input, &policies),
-            Some("allow".into())
-        );
+        assert_eq!(check("WebFetch", input, &policies), Some("allow".into()));
 
         // Subdomain match
         let input2 = r#"{"url": "https://api.example.com/v1"}"#;
-        assert_eq!(
-            check("WebFetch", input2, &policies),
-            Some("allow".into())
-        );
+        assert_eq!(check("WebFetch", input2, &policies), Some("allow".into()));
 
         // Different domain — no match
         let input3 = r#"{"url": "https://evil.com/path"}"#;
@@ -317,8 +306,14 @@ mod tests {
         assert!(matches_domain("https://example.com/path", "example.com"));
         assert!(matches_domain("https://api.example.com/v1", "example.com"));
         assert!(matches_domain("http://example.com", "example.com"));
-        assert!(matches_domain("https://example.com:8080/path", "example.com"));
-        assert!(!matches_domain("https://notexample.com/path", "example.com"));
+        assert!(matches_domain(
+            "https://example.com:8080/path",
+            "example.com"
+        ));
+        assert!(!matches_domain(
+            "https://notexample.com/path",
+            "example.com"
+        ));
         assert!(!matches_domain("https://evil.com/path", "example.com"));
     }
 

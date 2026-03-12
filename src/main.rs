@@ -283,8 +283,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 &sess.session_id,
                                 &tool_name,
                             )?;
-                            let matched: Vec<_> =
-                                pending.iter().filter(|tc| tc.tool_name == tool_name).collect();
+                            let matched: Vec<_> = pending
+                                .iter()
+                                .filter(|tc| tc.tool_name == tool_name)
+                                .collect();
                             for tc in &matched {
                                 audit::log(
                                     &tc.session_id,
@@ -325,8 +327,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         (None, Some(tool_name)) => {
                             let pending = db.get_pending_tool_calls(None)?;
                             let count = db.approve_all_pending_for_tool(&tool_name)?;
-                            let matched: Vec<_> =
-                                pending.iter().filter(|tc| tc.tool_name == tool_name).collect();
+                            let matched: Vec<_> = pending
+                                .iter()
+                                .filter(|tc| tc.tool_name == tool_name)
+                                .collect();
                             for tc in &matched {
                                 audit::log(
                                     &tc.session_id,
@@ -760,7 +764,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         println!("No policies configured.");
                         return Ok(());
                     }
-                    println!("{:<20} {:<10} {}", "TOOL", "ACTION", "PATTERN");
+                    println!("{:<20} {:<10} PATTERN", "TOOL", "ACTION");
                     for p in &config.policies {
                         let pattern_display = match (&p.pattern, &p.match_mode) {
                             (Some(pat), crate::config::MatchMode::Domain) => {
@@ -911,7 +915,10 @@ fn print_approved_details(
         } else {
             format::format_tool_input(&tc.tool_name, &tc.tool_input, 72)
         };
-        eprintln!("  ✓ [{}] {} — {}", session_display, tc.tool_name, description);
+        eprintln!(
+            "  ✓ [{}] {} — {}",
+            session_display, tc.tool_name, description
+        );
     }
 }
 
