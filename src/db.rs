@@ -256,7 +256,7 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "s1");
         assert_eq!(sessions[0].prompt, "do stuff");
-        assert_eq!(sessions[0].cwd, "/tmp");
+        assert_eq!(sessions[0]._cwd, "/tmp");
         assert_eq!(sessions[0].status, "running");
     }
 
@@ -288,8 +288,8 @@ mod tests {
         db.update_session_status("s1", "completed", Some(0)).unwrap();
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions[0].status, "completed");
-        assert!(sessions[0].completed_at.is_some());
-        assert_eq!(sessions[0].exit_code, Some(0));
+        assert!(sessions[0]._completed_at.is_some());
+        assert_eq!(sessions[0]._exit_code, Some(0));
     }
 
     #[test]
