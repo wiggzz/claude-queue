@@ -152,11 +152,6 @@ In help text and README, emphasize that session reuse is the **default and prefe
 
 67 `unwrap()` calls across 5 files. For a CLI tool this is generally acceptable, but converting panics at I/O boundaries to proper error messages (via `anyhow` or `miette`) would improve UX when things go wrong (bad permissions, missing files, etc.).
 
-## Session expiration
-**Priority:** Medium — hygiene
-
-Auto-expire sessions that have been running longer than the configured timeout (default 24h). Mark them as "expired" in the DB. Could run as part of `cq list` or as a separate `cq gc` command.
-
 ## Orchestrator approval transparency
 **Priority:** High — safety / UX
 
@@ -202,11 +197,6 @@ Add integration tests that exercise the full hook → policy → supervisor → 
 
 These would ideally run in CI using a mock or lightweight supervisor (no real LLM calls).
 
-## DB cleanup
-**Priority:** Medium — hygiene
-
-`cq gc` (or `cq cleanup`) to prune old sessions and tool calls from the DB. Options: `--older-than 7d` to remove sessions older than N days, `--status completed` to only remove finished sessions. Keeps the DB small and fast over time.
-
 ---
 
 ## Done
@@ -238,3 +228,5 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Audit log: show tool call details inline (`--verbose` flag)~~
 - ~~Bug: `cq result` returns resume response instead of original session output~~
 - ~~CLI: show effective config (`cq config show`)~~
+- ~~Session expiration (`cq gc` resolves stale running sessions)~~
+- ~~DB cleanup (`cq gc --older-than` prunes old sessions, tool calls, and log files)~~
