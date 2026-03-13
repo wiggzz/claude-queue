@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use crate::config;
 use crate::db::Db;
 use crate::format;
@@ -23,10 +24,17 @@ const BOLD: &str = "\x1b[1m";
 
 /// State for tailing a single JSONL file.
 struct TailState {
+    backend: AgentBackend,
     path: PathBuf,
     offset: u64,
     session_name: String,
     color: &'static str,
+}
+
+struct SessionSource {
+    backend: AgentBackend,
+    name: String,
+    path: PathBuf,
 }
 
 /// Show the last N messages from session(s), optionally following for new ones.
@@ -70,16 +78,16 @@ pub fn run(
     let multi_session = sessions.len() > 1;
 
     // Show last N messages from each session
-    for (name, path) in &sessions {
+    for source in &sessions {
         let color = COLORS[color_idx % COLORS.len()];
         color_idx += 1;
 
-        let events = read_last_n_events(path, num_messages)?;
+        let events = read_last_n_events(source.backend, &source.path, num_messages)?;
         for event in &events {
             if json_mode {
-                print_json_event(name, event);
+                print_json_event(&source.name, event);
             } else {
-                print_event(color, name, event, multi_session);
+                print_event(color, &source.name, event, multi_session);
             }
         }
     }
@@ -97,16 +105,17 @@ pub fn run(
     color_idx = 0;
 
     // Initialize tail states at end of each file
-    for (name, path) in &sessions {
-        let offset = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    for source in &sessions {
+        let offset = fs::metadata(&source.path).map(|m| m.len()).unwrap_or(0);
         let color = COLORS[color_idx % COLORS.len()];
         color_idx += 1;
         tails.insert(
-            path.to_string_lossy().to_string(),
+            source.path.to_string_lossy().to_string(),
             TailState {
-                path: path.clone(),
+                backend: source.backend,
+                path: source.path.clone(),
                 offset,
-                session_name: name.clone(),
+                session_name: source.name.clone(),
                 color,
             },
         );
@@ -119,19 +128,20 @@ pub fn run(
         // Periodically discover new sessions (for follow mode)
         if last_scan.elapsed() >= scan_interval {
             if let Ok(new_sessions) = find_sessions(&db, session_filter) {
-                for (name, path) in new_sessions {
-                    let key = path.to_string_lossy().to_string();
+                for source in new_sessions {
+                    let key = source.path.to_string_lossy().to_string();
                     if let std::collections::hash_map::Entry::Vacant(e) = tails.entry(key) {
-                        let offset = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                        let offset = fs::metadata(&source.path).map(|m| m.len()).unwrap_or(0);
                         let color = COLORS[color_idx % COLORS.len()];
                         color_idx += 1;
                         if !json_mode {
-                            eprintln!("{DIM}tracking: {}{}{RESET}", color, name);
+                            eprintln!("{DIM}tracking: {}{}{RESET}", color, source.name);
                         }
                         e.insert(TailState {
-                            path,
+                            backend: source.backend,
+                            path: source.path,
                             offset,
-                            session_name: name,
+                            session_name: source.name,
                             color,
                         });
                     }
@@ -145,7 +155,7 @@ pub fn run(
         for state in tails.values_mut() {
             let lines = read_new_lines(state);
             for line in lines {
-                if let Some(event) = parse_event(&line) {
+                if let Some(event) = parse_event(state.backend, &line) {
                     if json_mode {
                         print_json_event(&state.session_name, &event);
                     } else {
@@ -168,7 +178,7 @@ pub fn run(
 fn find_sessions(
     db: &Db,
     session_filter: Option<&str>,
-) -> Result<Vec<(String, PathBuf)>, Box<dyn std::error::Error>> {
+) -> Result<Vec<SessionSource>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     let sessions = if let Some(filter) = session_filter {
@@ -199,22 +209,47 @@ fn find_sessions(
             .cloned()
             .unwrap_or_else(|| s.session_id[..8.min(s.session_id.len())].to_string());
 
-        let claude_sid = s.claude_session_id.as_deref().unwrap_or(&s.session_id);
-        if let Some(path) = find_jsonl_for_session(claude_sid) {
-            results.push((display_name, path));
+        if let Some(path) = find_session_path(s) {
+            results.push(SessionSource {
+                backend: s.agent_backend,
+                name: display_name,
+                path,
+            });
         }
     }
 
     Ok(results)
 }
 
+fn find_session_path(session: &crate::db::Session) -> Option<PathBuf> {
+    match session.agent_backend {
+        AgentBackend::Claude => {
+            let claude_sid = session
+                .claude_session_id
+                .as_deref()
+                .or(session.agent_session_id.as_deref())
+                .unwrap_or(&session.session_id);
+            find_claude_jsonl_for_session(claude_sid)
+        }
+        AgentBackend::Pi => session
+            .agent_session_id
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|path| path.exists()),
+    }
+}
+
 /// Read the last N parsed events from a JSONL file.
 fn read_last_n_events(
+    backend: AgentBackend,
     path: &PathBuf,
     n: usize,
 ) -> Result<Vec<StreamEvent>, Box<dyn std::error::Error>> {
     let content = fs::read_to_string(path)?;
-    let events: Vec<StreamEvent> = content.lines().filter_map(parse_event).collect();
+    let events: Vec<StreamEvent> = content
+        .lines()
+        .filter_map(|line| parse_event(backend, line))
+        .collect();
 
     // Take last N
     let skip = events.len().saturating_sub(n);
@@ -278,7 +313,14 @@ enum EventType {
 }
 
 /// Parse a JSONL line into a StreamEvent, or None if it's not interesting.
-fn parse_event(line: &str) -> Option<StreamEvent> {
+fn parse_event(backend: AgentBackend, line: &str) -> Option<StreamEvent> {
+    match backend {
+        AgentBackend::Claude => parse_claude_event(line),
+        AgentBackend::Pi => parse_pi_event(line),
+    }
+}
+
+fn parse_claude_event(line: &str) -> Option<StreamEvent> {
     let val: Value = serde_json::from_str(line).ok()?;
 
     let timestamp = val
@@ -365,6 +407,99 @@ fn parse_event(line: &str) -> Option<StreamEvent> {
                 }
             }
             None
+        }
+        _ => None,
+    }
+}
+
+fn parse_pi_event(line: &str) -> Option<StreamEvent> {
+    let val: Value = serde_json::from_str(line).ok()?;
+    if val.get("type").and_then(|v| v.as_str()) != Some("message") {
+        return None;
+    }
+
+    let message = val.get("message")?;
+    let timestamp = val
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .or_else(|| message.get("timestamp").and_then(|v| v.as_str()))
+        .map(|s| s.to_string());
+
+    match message.get("role").and_then(|v| v.as_str()) {
+        Some("assistant") => {
+            let blocks = message.get("content")?.as_array()?;
+            for block in blocks {
+                match block.get("type").and_then(|v| v.as_str())? {
+                    "text" => {
+                        let text = block.get("text").and_then(|v| v.as_str())?;
+                        if !text.trim().is_empty() {
+                            return Some(StreamEvent {
+                                event_type: EventType::Text(text.to_string()),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+                    "thinking" => {
+                        let thinking = block
+                            .get("thinking")
+                            .or_else(|| block.get("text"))
+                            .and_then(|v| v.as_str())?;
+                        if !thinking.trim().is_empty() {
+                            return Some(StreamEvent {
+                                event_type: EventType::Thinking(thinking.to_string()),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+                    "toolCall" => {
+                        let name = block
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let args = block.get("arguments").cloned().unwrap_or(Value::Null);
+                        let canonical = AgentBackend::Pi.canonicalize_tool_call(name, args).ok()?;
+                        let input_summary = format::format_tool_input(
+                            &canonical.tool_name,
+                            &canonical.tool_input,
+                            120,
+                        );
+                        return Some(StreamEvent {
+                            event_type: EventType::ToolUse {
+                                name: canonical.tool_name,
+                                input_summary,
+                            },
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+        Some("toolResult") => {
+            let is_error = message
+                .get("isError")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let content = message.get("content")?.as_array()?;
+            let text = content
+                .iter()
+                .filter_map(|block| block.get("text").and_then(|v| v.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let preview = if text.len() > 200 {
+                format!("{}...", &text[..197])
+            } else {
+                text
+            };
+            let first_line = preview.lines().next().unwrap_or("").to_string();
+            Some(StreamEvent {
+                event_type: EventType::ToolResult {
+                    content_preview: first_line,
+                    is_error,
+                },
+                timestamp,
+            })
         }
         _ => None,
     }
@@ -471,7 +606,7 @@ fn format_time_short(ts: &str) -> Option<String> {
 }
 
 /// Find the JSONL file for a given Claude session ID.
-fn find_jsonl_for_session(session_id: &str) -> Option<PathBuf> {
+fn find_claude_jsonl_for_session(session_id: &str) -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let projects_dir = PathBuf::from(home).join(".claude").join("projects");
     if !projects_dir.is_dir() {
@@ -519,7 +654,7 @@ mod tests {
             }
         })
         .to_string();
-        let event = parse_event(&line).unwrap();
+        let event = parse_event(AgentBackend::Claude, &line).unwrap();
         assert!(matches!(event.event_type, EventType::Text(ref t) if t == "Hello world"));
         assert_eq!(
             event.timestamp,
@@ -538,7 +673,7 @@ mod tests {
             }
         })
         .to_string();
-        let event = parse_event(&line).unwrap();
+        let event = parse_event(AgentBackend::Claude, &line).unwrap();
         assert!(
             matches!(event.event_type, EventType::Thinking(ref t) if t == "Let me analyze this...")
         );
@@ -560,7 +695,7 @@ mod tests {
             }
         })
         .to_string();
-        let event = parse_event(&line).unwrap();
+        let event = parse_event(AgentBackend::Claude, &line).unwrap();
         assert!(matches!(event.event_type, EventType::ToolUse { ref name, .. } if name == "Bash"));
     }
 
@@ -579,7 +714,7 @@ mod tests {
             }
         })
         .to_string();
-        let event = parse_event(&line).unwrap();
+        let event = parse_event(AgentBackend::Claude, &line).unwrap();
         assert!(
             matches!(event.event_type, EventType::ToolResult { ref content_preview, .. } if content_preview.contains("passed"))
         );
@@ -601,7 +736,7 @@ mod tests {
             }
         })
         .to_string();
-        let event = parse_event(&line).unwrap();
+        let event = parse_event(AgentBackend::Claude, &line).unwrap();
         assert!(matches!(
             event.event_type,
             EventType::ToolResult { is_error: true, .. }
@@ -615,7 +750,7 @@ mod tests {
             "operation": "enqueue",
         })
         .to_string();
-        assert!(parse_event(&line).is_none());
+        assert!(parse_event(AgentBackend::Claude, &line).is_none());
     }
 
     #[test]
@@ -628,7 +763,7 @@ mod tests {
             }
         })
         .to_string();
-        assert!(parse_event(&line).is_none());
+        assert!(parse_event(AgentBackend::Claude, &line).is_none());
     }
 
     #[test]
@@ -638,6 +773,7 @@ mod tests {
         file.flush().unwrap();
 
         let mut state = TailState {
+            backend: AgentBackend::Claude,
             path: file.path().to_path_buf(),
             offset: 0,
             session_name: "test".to_string(),
@@ -672,9 +808,76 @@ mod tests {
         }
         file.flush().unwrap();
 
-        let events = read_last_n_events(&file.path().to_path_buf(), 3).unwrap();
+        let events =
+            read_last_n_events(AgentBackend::Claude, &file.path().to_path_buf(), 3).unwrap();
         assert_eq!(events.len(), 3);
         assert!(matches!(&events[0].event_type, EventType::Text(t) if t == "message 8"));
         assert!(matches!(&events[2].event_type, EventType::Text(t) if t == "message 10"));
+    }
+
+    #[test]
+    fn test_parse_pi_event_tool_call() {
+        let line = serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-03-12T14:20:39.514Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "name": "read",
+                    "arguments": {"path": "src/main.rs"}
+                }]
+            }
+        })
+        .to_string();
+        let event = parse_event(AgentBackend::Pi, &line).unwrap();
+        assert!(matches!(event.event_type, EventType::ToolUse { ref name, .. } if name == "Read"));
+    }
+
+    #[test]
+    fn test_parse_pi_event_tool_result() {
+        let line = serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-03-12T14:20:40.000Z",
+            "message": {
+                "role": "toolResult",
+                "toolName": "read",
+                "isError": true,
+                "content": [{
+                    "type": "text",
+                    "text": "ENOENT: no such file"
+                }]
+            }
+        })
+        .to_string();
+        let event = parse_event(AgentBackend::Pi, &line).unwrap();
+        assert!(matches!(
+            event.event_type,
+            EventType::ToolResult { is_error: true, ref content_preview }
+                if content_preview.contains("ENOENT")
+        ));
+    }
+
+    #[test]
+    fn test_find_session_path_for_pi_uses_agent_session_file() {
+        let file = NamedTempFile::new().unwrap();
+        let session = crate::db::Session {
+            _id: 1,
+            session_id: "cq-session".into(),
+            agent_backend: AgentBackend::Pi,
+            agent_session_id: Some(file.path().to_string_lossy().into_owned()),
+            claude_session_id: None,
+            name: Some("pi-task".into()),
+            prompt: "prompt".into(),
+            _cwd: ".".into(),
+            status: "running".into(),
+            pid: None,
+            started_at: "2026-03-12T14:20:39.514Z".into(),
+            _completed_at: None,
+            _exit_code: None,
+        };
+
+        let path = find_session_path(&session).unwrap();
+        assert_eq!(path, file.path());
     }
 }
