@@ -346,15 +346,12 @@ impl Db {
         &self,
         session_name: &str,
     ) -> rusqlite::Result<Option<(String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT prompt, cwd FROM queued_messages WHERE session_name = ?1",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT prompt, cwd FROM queued_messages WHERE session_name = ?1")?;
         let result = stmt
             .query_map(params![session_name], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                ))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?
             .next();
         match result {
