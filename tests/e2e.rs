@@ -42,12 +42,10 @@ impl TestEnv {
         .unwrap();
 
         // Find the cq binary
-        let cq_bin = env::var("CQ_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let manifest_dir = env!("CARGO_MANIFEST_DIR");
-                PathBuf::from(manifest_dir).join("target/debug/cq")
-            });
+        let cq_bin = env::var("CQ_BIN").map(PathBuf::from).unwrap_or_else(|_| {
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            PathBuf::from(manifest_dir).join("target/debug/cq")
+        });
 
         TestEnv {
             work_dir,
@@ -182,7 +180,10 @@ fn test_basic_push_and_wait() {
     let env = TestEnv::new("basic");
     let name = "basic";
 
-    let result = env.push(name, "What is 9+9? Reply with ONLY the number, nothing else.");
+    let result = env.push(
+        name,
+        "What is 9+9? Reply with ONLY the number, nothing else.",
+    );
     assert!(result.success, "push failed: {}", result.stderr);
     assert!(
         result.stdout.contains("Started session"),
@@ -296,11 +297,7 @@ fn test_cwd_mismatch_warning() {
     env.wait_session(name, Duration::from_secs(60));
 
     // Push with a different cwd — should warn on stderr
-    let result = env.push_with_cwd(
-        name,
-        "What is 2+2? Reply with ONLY the number.",
-        "/tmp",
-    );
+    let result = env.push_with_cwd(name, "What is 2+2? Reply with ONLY the number.", "/tmp");
     assert!(
         result.stderr.contains("warning") && result.stderr.contains("differs"),
         "Expected cwd mismatch warning in stderr, got: {}",

@@ -24,14 +24,14 @@ pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn s
     if let Some(sess) = db.find_session(name)? {
         // Warn if the provided cwd differs from the session's original cwd.
         // Claude stores sessions per-project, so resume always uses the original cwd.
-        if let Ok(cwd_abs) = fs::canonicalize(cwd) {
-            if cwd_abs.to_string_lossy() != sess._cwd {
-                eprintln!(
-                    "warning: --cwd '{}' differs from session's original cwd '{}'. Resume will use the original cwd.",
-                    cwd_abs.display(),
-                    sess._cwd,
-                );
-            }
+        if let Ok(cwd_abs) = fs::canonicalize(cwd)
+            && cwd_abs.to_string_lossy() != sess._cwd
+        {
+            eprintln!(
+                "warning: --cwd '{}' differs from session's original cwd '{}'. Resume will use the original cwd.",
+                cwd_abs.display(),
+                sess._cwd,
+            );
         }
 
         let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
