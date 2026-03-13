@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/wiggzz/claude-queue/compare/v0.7.0...v0.8.0) (2026-03-13)
+
+
+### Features
+
+* update agents md and feature for pi backend release ([#30](https://github.com/wiggzz/claude-queue/issues/30)) ([caaa293](https://github.com/wiggzz/claude-queue/commit/caaa293089fd159e4da24150d842b238130659fa))
+
 ## [0.7.0](https://github.com/wiggzz/claude-queue/compare/v0.6.0...v0.7.0) (2026-03-13)
 
 
