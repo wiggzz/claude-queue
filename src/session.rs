@@ -91,11 +91,25 @@ pub fn cancel_queued(name: &str) -> Result<usize, Box<dyn std::error::Error>> {
 }
 
 /// Start a brand new sub-agent session.
+/// Fails if a named session already exists and is still running (use `cq push` instead).
 pub fn start(
     prompt: &str,
     name: Option<&str>,
     cwd: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // Guard: if a named session is already running, refuse to start a duplicate
+    if let Some(name) = name {
+        let db = Db::open(&config::db_path())?;
+        if let Some(sess) = db.find_session(name)? {
+            let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
+            if sess.status == "running" && alive {
+                return Err(format!(
+                    "Session '{name}' is already running. Use `cq push {name} \"...\"` to queue a message, or `cq interrupt {name} \"...\"` to kill and restart."
+                ).into());
+            }
+        }
+    }
+
     let session_id = uuid::Uuid::new_v4().to_string();
     let args = vec![
         "-p".to_string(),
