@@ -312,6 +312,57 @@ impl Db {
         Ok(changed)
     }
 
+    // --- GC ---
+
+    pub fn get_running_sessions(&self) -> rusqlite::Result<Vec<Session>> {
+        let sql = format!("SELECT {SESSION_COLS} FROM sessions WHERE status = 'running'");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], map_session)?;
+        rows.collect()
+    }
+
+    /// Delete sessions with started_at before the given ISO 8601 cutoff.
+    /// Only deletes sessions that are not running.
+    /// Returns the list of deleted session IDs.
+    pub fn delete_sessions_older_than(&self, cutoff: &str) -> rusqlite::Result<Vec<String>> {
+        // First collect the session IDs that will be deleted
+        let mut stmt = self.conn.prepare(
+            "SELECT session_id FROM sessions WHERE started_at < ?1 AND status != 'running'",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(params![cutoff], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+
+        if !ids.is_empty() {
+            self.conn.execute(
+                "DELETE FROM sessions WHERE started_at < ?1 AND status != 'running'",
+                params![cutoff],
+            )?;
+        }
+        Ok(ids)
+    }
+
+    /// Delete tool_calls belonging to the given session IDs. Returns count deleted.
+    pub fn delete_tool_calls_for_sessions(
+        &self,
+        session_ids: &[String],
+    ) -> rusqlite::Result<usize> {
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<String> = (1..=session_ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "DELETE FROM tool_calls WHERE session_id IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = session_ids
+            .iter()
+            .map(|s| s as &dyn rusqlite::types::ToSql)
+            .collect();
+        let count = self.conn.execute(&sql, params.as_slice())?;
+        Ok(count)
+    }
+
     fn map_tool_call(row: &rusqlite::Row) -> rusqlite::Result<ToolCall> {
         Ok(ToolCall {
             id: row.get(0)?,
@@ -584,6 +635,89 @@ mod tests {
             .unwrap();
         let results = db.find_pending_by_summary("Pushes branch").unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_get_running_sessions() {
+        let db = open_temp_db();
+        db.create_session("s1", None, None, "p1", "/tmp", 1)
+            .unwrap();
+        db.create_session("s2", None, None, "p2", "/tmp", 2)
+            .unwrap();
+        db.update_session_status("s2", "completed", Some(0))
+            .unwrap();
+        db.create_session("s3", None, None, "p3", "/tmp", 3)
+            .unwrap();
+        let running = db.get_running_sessions().unwrap();
+        assert_eq!(running.len(), 2);
+        let ids: Vec<&str> = running.iter().map(|s| s.session_id.as_str()).collect();
+        assert!(ids.contains(&"s1"));
+        assert!(ids.contains(&"s3"));
+    }
+
+    #[test]
+    fn test_delete_sessions_older_than() {
+        let db = open_temp_db();
+        // Insert sessions with explicit timestamps
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, prompt, cwd, pid, status, started_at) VALUES ('old1', 'p', '/tmp', 1, 'completed', '2020-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, prompt, cwd, pid, status, started_at) VALUES ('old2', 'p', '/tmp', 2, 'failed', '2020-01-02 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, prompt, cwd, pid, status, started_at) VALUES ('new1', 'p', '/tmp', 3, 'completed', '2099-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, prompt, cwd, pid, status, started_at) VALUES ('running1', 'p', '/tmp', 4, 'running', '2020-01-01 00:00:00')",
+            [],
+        ).unwrap();
+
+        let deleted = db
+            .delete_sessions_older_than("2025-01-01 00:00:00")
+            .unwrap();
+        assert_eq!(deleted.len(), 2);
+        assert!(deleted.contains(&"old1".to_string()));
+        assert!(deleted.contains(&"old2".to_string()));
+
+        // Verify remaining sessions
+        let remaining = db.get_sessions().unwrap();
+        assert_eq!(remaining.len(), 2);
+        let ids: Vec<&str> = remaining.iter().map(|s| s.session_id.as_str()).collect();
+        assert!(ids.contains(&"new1"));
+        assert!(ids.contains(&"running1")); // running sessions are preserved
+    }
+
+    #[test]
+    fn test_delete_tool_calls_for_sessions() {
+        let db = open_temp_db();
+        db.insert_tool_call("s1", "Bash", "a").unwrap();
+        db.insert_tool_call("s1", "Read", "b").unwrap();
+        db.insert_tool_call("s2", "Write", "c").unwrap();
+        db.insert_tool_call("s3", "Bash", "d").unwrap();
+
+        let count = db
+            .delete_tool_calls_for_sessions(&["s1".to_string(), "s3".to_string()])
+            .unwrap();
+        assert_eq!(count, 3);
+
+        // Only s2's tool call should remain
+        let remaining = db.get_pending_tool_calls(None).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].session_id, "s2");
+    }
+
+    #[test]
+    fn test_delete_tool_calls_for_empty_sessions() {
+        let db = open_temp_db();
+        db.insert_tool_call("s1", "Bash", "a").unwrap();
+        let count = db.delete_tool_calls_for_sessions(&[]).unwrap();
+        assert_eq!(count, 0);
+        // Original tool call still there
+        assert_eq!(db.get_pending_tool_calls(None).unwrap().len(), 1);
     }
 
     #[test]

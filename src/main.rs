@@ -14,6 +14,7 @@ mod watch;
 use clap::Parser;
 use cli::{Cli, Commands, ConfigCommands, PendingCommands, PolicyCommands, SessionsCommands};
 use config::Config;
+use rusqlite::params;
 
 fn main() {
     config::ensure_user_config();
@@ -670,6 +671,109 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
+        Commands::Gc {
+            older_than,
+            dry_run,
+        } => {
+            let db = open_db()?;
+
+            // 1. Resolve stale running sessions (process dead but DB says running)
+            let running = db.get_running_sessions()?;
+            let mut stale_count = 0usize;
+            for s in &running {
+                let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
+                    if dry_run {
+                        let display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
+                        println!("[dry-run] Would resolve stale session: {display}");
+                    } else {
+                        session::resolve_dead_session(&db, &s.session_id);
+                    }
+                    stale_count += 1;
+                }
+            }
+
+            // 2. Parse duration and compute cutoff
+            let cutoff = parse_duration_to_cutoff(&older_than)?;
+
+            // 3. Delete old non-running sessions and their tool calls
+            if dry_run {
+                // In dry-run, just count what would be deleted
+                let sessions = db.get_sessions()?;
+                let old_sessions: Vec<_> = sessions
+                    .iter()
+                    .filter(|s| s.status != "running" && s.started_at < cutoff)
+                    .collect();
+                let old_ids: Vec<String> =
+                    old_sessions.iter().map(|s| s.session_id.clone()).collect();
+                let tool_call_count = if old_ids.is_empty() {
+                    0
+                } else {
+                    // Count tool calls that would be deleted
+                    old_ids
+                        .iter()
+                        .map(|id| {
+                            db.conn
+                                .query_row(
+                                    "SELECT COUNT(*) FROM tool_calls WHERE session_id = ?1",
+                                    params![id],
+                                    |row| row.get::<_, usize>(0),
+                                )
+                                .unwrap_or(0)
+                        })
+                        .sum::<usize>()
+                };
+                // Count log files that would be deleted
+                let log_dir = config::log_dir();
+                let log_count: usize = old_ids
+                    .iter()
+                    .map(|id| {
+                        let mut count = 0;
+                        if log_dir.join(format!("{id}.log")).exists() {
+                            count += 1;
+                        }
+                        if log_dir.join(format!("{id}.stderr")).exists() {
+                            count += 1;
+                        }
+                        count
+                    })
+                    .sum();
+
+                for s in &old_sessions {
+                    let display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
+                    println!("[dry-run] Would delete session: {display} ({})", s.status);
+                }
+                println!(
+                    "\n[dry-run] Would resolve {stale_count} stale session(s). Would delete {} session(s), {tool_call_count} tool call(s), and {log_count} log file(s).",
+                    old_sessions.len()
+                );
+            } else {
+                let deleted_ids = db.delete_sessions_older_than(&cutoff)?;
+                let session_count = deleted_ids.len();
+                let tool_call_count = db.delete_tool_calls_for_sessions(&deleted_ids)?;
+
+                // Clean up log files
+                let log_dir = config::log_dir();
+                let mut log_count = 0usize;
+                for id in &deleted_ids {
+                    let log_path = log_dir.join(format!("{id}.log"));
+                    let stderr_path = log_dir.join(format!("{id}.stderr"));
+                    if log_path.exists() {
+                        let _ = std::fs::remove_file(&log_path);
+                        log_count += 1;
+                    }
+                    if stderr_path.exists() {
+                        let _ = std::fs::remove_file(&stderr_path);
+                        log_count += 1;
+                    }
+                }
+
+                println!(
+                    "Resolved {stale_count} stale session(s). Deleted {session_count} session(s), {tool_call_count} tool call(s). Cleaned up {log_count} log file(s)."
+                );
+            }
+        }
+
         Commands::Watch => {
             watch::run()?;
         }
@@ -1114,6 +1218,36 @@ fn print_approved_details(
             session_display, tc.tool_name, description
         );
     }
+}
+
+/// Parse a duration string like "7d", "24h", "30d" and return an ISO 8601 cutoff timestamp
+/// in the format SQLite's datetime() produces ("YYYY-MM-DD HH:MM:SS").
+fn parse_duration_to_cutoff(s: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Duration string cannot be empty".into());
+    }
+    let (num_str, unit) = s.split_at(s.len() - 1);
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid duration: '{s}'. Use e.g. '7d', '24h', '30d'"))?;
+    let secs = match unit {
+        "h" => num * 3600,
+        "d" => num * 86400,
+        _ => {
+            return Err(
+                format!("Unknown duration unit '{unit}'. Use 'h' (hours) or 'd' (days)").into(),
+            );
+        }
+    };
+    // Use SQLite to compute the cutoff timestamp, keeping format consistent with the DB
+    let db = open_db()?;
+    let cutoff: String = db.conn.query_row(
+        &format!("SELECT datetime('now', '-{secs} seconds')"),
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(cutoff)
 }
 
 fn tool_call_to_json(tc: &db::ToolCall) -> String {
