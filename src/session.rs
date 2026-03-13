@@ -580,7 +580,9 @@ fn build_pi_command(
 }
 
 fn should_use_script_pty(backend: AgentBackend) -> bool {
-    cfg!(unix) && matches!(backend, AgentBackend::Claude)
+    cfg!(unix)
+        && matches!(backend, AgentBackend::Claude)
+        && std::env::var("CQ_DISABLE_PTY").is_err()
 }
 
 fn build_script_command(

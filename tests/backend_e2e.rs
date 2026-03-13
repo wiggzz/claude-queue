@@ -59,6 +59,7 @@ impl TestEnv {
         let mut cmd = Command::new(cq_bin());
         cmd.env("HOME", self.home_dir.path())
             .env("CQ_DB", &self.db_path)
+            .env("CQ_DISABLE_PTY", "1")
             .env(
                 "PATH",
                 format!(
