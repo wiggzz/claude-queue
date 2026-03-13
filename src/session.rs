@@ -4,50 +4,90 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// Result of attempting to start a session that may already be running.
-pub enum StartResult {
+/// Result of a push operation.
+pub enum PushResult {
     /// A new session was started (session_id).
     Started(String),
     /// The message was queued for delivery when the running session completes.
     Queued,
-    /// The message replaced a previously queued message.
-    Replaced,
+    /// The session was resumed with the message (session_id).
+    Resumed(String),
 }
 
-/// Start a session, or queue the message if a same-named session is still running.
-/// Returns StartResult indicating what happened.
-pub fn queue_or_start(
-    prompt: &str,
-    name: &str,
-    cwd: &str,
-) -> Result<StartResult, Box<dyn std::error::Error>> {
+/// Push a message to a named session. This is the primary entry point:
+/// - No session exists → start a new one
+/// - Session is running → queue the message
+/// - Session is completed/failed → resume it (with any previously queued messages)
+pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn std::error::Error>> {
     let db = Db::open(&config::db_path())?;
-    let cwd_abs = fs::canonicalize(cwd)?;
 
-    // Check if there's a running session with this name
     if let Some(sess) = db.find_session(name)? {
         let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
         if sess.status == "running" && alive {
             // Session is running — queue the message
-            let had_existing = db.has_queued_message(name)?;
-            db.upsert_queued_message(name, prompt, &cwd_abs.to_string_lossy())?;
-            return Ok(if had_existing {
-                StartResult::Replaced
-            } else {
-                StartResult::Queued
-            });
+            let cwd_abs = fs::canonicalize(cwd)?;
+            db.push_queued_message(name, prompt, Some(&cwd_abs.to_string_lossy()))?;
+            return Ok(PushResult::Queued);
         }
+        // Session exists but is done — collect any queued messages + this one, resume
+        let mut messages = db.take_all_queued_messages(name)?;
+        messages.push((prompt.to_string(), Some(cwd.to_string())));
+        let combined_prompt = messages
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Use the last non-None cwd, falling back to the provided cwd
+        let resume_cwd = messages
+            .iter()
+            .rev()
+            .find_map(|(_, c)| c.as_deref())
+            .unwrap_or(cwd);
+        let session_id = resume_session(name, &sess, &combined_prompt, resume_cwd)?;
+        return Ok(PushResult::Resumed(session_id));
     }
 
-    // No running session — start a new one
+    // No session exists — start a new one
     let session_id = start(prompt, Some(name), cwd)?;
-    Ok(StartResult::Started(session_id))
+    Ok(PushResult::Started(session_id))
 }
 
-/// Cancel a queued message for a named session.
-pub fn cancel_queued(name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+/// Interrupt a running session: kill it, clear the queue, and resume with a new message.
+pub fn interrupt(
+    name: &str,
+    prompt: &str,
+    cwd: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
     let db = Db::open(&config::db_path())?;
-    Ok(db.cancel_queued_message(name)?)
+    let sess = db
+        .find_session(name)?
+        .ok_or_else(|| format!("No session found: {name}"))?;
+
+    // Kill the running session if alive
+    if let Some(pid) = sess.pid
+        && is_pid_alive(pid)
+    {
+        kill_session(pid)?;
+        // Wait briefly for process to die
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let _ = db.update_session_status(&sess.session_id, "killed", None);
+
+    // Clear the queue
+    let cleared = db.clear_queued_messages(name)?;
+    if cleared > 0 {
+        eprintln!("Cleared {cleared} queued message(s) for session {name}.");
+    }
+
+    // Resume with the interrupt message
+    let session_id = resume_session(name, &sess, prompt, cwd)?;
+    Ok(session_id)
+}
+
+/// Cancel all queued messages for a named session.
+pub fn cancel_queued(name: &str) -> Result<usize, Box<dyn std::error::Error>> {
+    let db = Db::open(&config::db_path())?;
+    Ok(db.clear_queued_messages(name)?)
 }
 
 /// Start a brand new sub-agent session.
@@ -66,23 +106,17 @@ pub fn start(
     launch(&session_id, Some(&session_id), name, prompt, cwd, args)
 }
 
-/// Resume a session. Accepts either a cq session ID prefix or a raw claude session ID.
-/// Looks up the claude_session_id from the DB if it's a cq prefix, otherwise uses it directly.
-pub fn resume(
-    id_or_prefix: &str,
+/// Resume a session by name, using the claude_session_id from a previous session.
+fn resume_session(
+    name: &str,
+    prev_session: &crate::db::Session,
     prompt: &str,
     cwd: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let db = Db::open(&config::db_path())?;
-
-    // Try to find by cq session prefix first, then by claude session ID
-    let claude_sid = if let Some(sess) = db.find_session(id_or_prefix)? {
-        // Found a cq session — use its claude_session_id, falling back to session_id
-        sess.claude_session_id.unwrap_or(sess.session_id)
-    } else {
-        // Not in our DB — treat as a raw claude session ID
-        id_or_prefix.to_string()
-    };
+    let claude_sid = prev_session
+        .claude_session_id
+        .clone()
+        .unwrap_or_else(|| prev_session.session_id.clone());
 
     let cq_session_id = uuid::Uuid::new_v4().to_string();
     let args = vec![
@@ -91,12 +125,6 @@ pub fn resume(
         claude_sid.clone(),
         prompt.to_string(),
     ];
-    // Inherit the name from the original session if it had one
-    let name = if let Some(sess) = db.find_session(id_or_prefix)? {
-        sess.name
-    } else {
-        None
-    };
 
     let display_prompt = format!(
         "[resumed {}] {}",
@@ -106,7 +134,7 @@ pub fn resume(
     launch(
         &cq_session_id,
         Some(&claude_sid),
-        name.as_deref(),
+        Some(name),
         &display_prompt,
         cwd,
         args,
@@ -211,23 +239,37 @@ fn launch(
                 }
             }
 
-            // Check for queued message and deliver it as a resume
+            // Check for queued messages and deliver them as a resume
             if let Some(ref name) = session_name
-                && let Ok(Some((prompt, cwd))) = db.take_queued_message(name)
+                && let Ok(messages) = db.take_all_queued_messages(name)
+                && !messages.is_empty()
             {
-                // Use the queued cwd, falling back to the original session's cwd
-                let resume_cwd = if cwd.is_empty() {
-                    &cwd_for_thread
-                } else {
-                    &cwd
-                };
-                eprintln!("Delivering queued message for session {name}...");
-                match resume(&sid, &prompt, resume_cwd) {
-                    Ok(new_id) => {
-                        eprintln!("Queued message delivered: session {name} resumed ({new_id})");
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to deliver queued message for session {name}: {e}");
+                let combined_prompt = messages
+                    .iter()
+                    .map(|(p, _)| p.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Use the last non-None cwd, falling back to the original session's cwd
+                let resume_cwd_owned = messages
+                    .iter()
+                    .rev()
+                    .find_map(|(_, c)| c.clone())
+                    .unwrap_or_else(|| cwd_for_thread.clone());
+                eprintln!(
+                    "Delivering {} queued message(s) for session {name}...",
+                    messages.len()
+                );
+                // Look up the session to get claude_session_id for resume
+                if let Ok(Some(sess)) = db.find_session(name) {
+                    match resume_session(name, &sess, &combined_prompt, &resume_cwd_owned) {
+                        Ok(new_id) => {
+                            eprintln!(
+                                "Queued messages delivered: session {name} resumed ({new_id})"
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to deliver queued messages for session {name}: {e}");
+                        }
                     }
                 }
             }

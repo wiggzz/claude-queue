@@ -40,47 +40,43 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run()?;
         }
 
-        Commands::Start {
-            prompt,
+        Commands::Start { prompt, name, cwd } => {
+            let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
+            let display = name.as_deref().unwrap_or(&session_id[..8]);
+            println!("Started session: {display} ({session_id})");
+        }
+
+        Commands::Push {
             name,
+            prompt,
             cwd,
             cancel,
         } => {
             if cancel {
-                let name = name.as_deref().expect("--cancel requires --name");
-                if session::cancel_queued(name)? {
-                    println!("Cancelled queued message for session {name}.");
+                let count = session::cancel_queued(&name)?;
+                if count > 0 {
+                    println!("Cancelled {count} queued message(s) for session {name}.");
                 } else {
-                    println!("No queued message for session {name}.");
+                    println!("No queued messages for session {name}.");
                 }
             } else {
-                let prompt = prompt.ok_or("prompt is required (unless using --cancel)")?;
-                if let Some(ref name) = name {
-                    match session::queue_or_start(&prompt, name, &cwd)? {
-                        session::StartResult::Started(session_id) => {
-                            println!("Started session: {name} ({session_id})");
-                        }
-                        session::StartResult::Queued => {
-                            println!("Queued message for running session: {name}");
-                        }
-                        session::StartResult::Replaced => {
-                            println!("Replaced queued message for running session: {name}");
-                        }
+                match session::push(&prompt, &name, &cwd)? {
+                    session::PushResult::Started(session_id) => {
+                        println!("Started session: {name} ({session_id})");
                     }
-                } else {
-                    let session_id = session::start(&prompt, None, &cwd)?;
-                    println!("Started session: {} ({session_id})", &session_id[..8]);
+                    session::PushResult::Queued => {
+                        println!("Queued message for running session: {name}");
+                    }
+                    session::PushResult::Resumed(session_id) => {
+                        println!("Resumed session: {name} ({session_id})");
+                    }
                 }
             }
         }
 
-        Commands::Resume {
-            session_id,
-            prompt,
-            cwd,
-        } => {
-            let new_session_id = session::resume(&session_id, &prompt, &cwd)?;
-            println!("Resumed session: {new_session_id}");
+        Commands::Interrupt { name, prompt, cwd } => {
+            let session_id = session::interrupt(&name, &prompt, &cwd)?;
+            println!("Interrupted and resumed session: {name} ({session_id})");
         }
 
         Commands::List { session, status } => {

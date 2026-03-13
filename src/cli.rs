@@ -9,16 +9,16 @@ use clap::{Parser, Subcommand};
 Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
 
 QUICK START:
-  1. cq start \"fix the auth bug\" --name auth-fix --cwd ~/myproject
-  2. cq start \"add tests\" --name tests --cwd ~/myproject
+  1. cq push auth-fix \"fix the auth bug\" --cwd ~/myproject
+  2. cq push tests \"add tests\" --cwd ~/myproject
   3. cq pending                    # tool calls waiting for approval
   4. cq approve all                # approve everything pending
   5. cq list                       # check session statuses
   6. cq result auth-fix            # get final output (by name or ID prefix)
-  7. cq resume auth-fix \"now fix the edge case too\"
+  7. cq push auth-fix \"now fix the edge case too\"
 
 BEST PRACTICES FOR ORCHESTRATORS:
-  - Always use --name so you can refer to sessions later
+  - Use cq push <name> — it starts, queues, or resumes as needed
   - Use --cwd to set each sub-agent's working directory
   - For agents editing overlapping files, use git worktrees:
       git worktree add ../my-worktree && cq start \"...\" --cwd ../my-worktree
@@ -47,24 +47,45 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start a new sub-agent: cq start "your prompt here" [--name my-task] [--cwd DIR]
-    ///
-    /// If --name is given and that session is still running, the message is queued
-    /// and will be delivered as a resume when the session completes. A second queued
-    /// message replaces the first (at most one pending follow-up per session).
-    /// Use --cancel to remove a queued-but-not-yet-delivered message.
+    /// Start a fresh sub-agent session (always creates new, never queues or resumes).
+    /// Use `cq push` for the smart start/queue/resume behavior.
     Start {
-        /// The prompt to send to the sub-agent (optional with --cancel)
-        prompt: Option<String>,
-        /// Friendly name for this session (used with resume, result, etc.)
+        /// The prompt to send to the sub-agent
+        prompt: String,
+        /// Friendly name for this session
         #[arg(long, short)]
         name: Option<String>,
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
-        /// Cancel a queued-but-not-yet-delivered message for the named session
-        #[arg(long, requires = "name")]
+    },
+    /// Push a message to a session: starts, queues, or resumes as needed.
+    ///
+    /// If no session exists with this name, starts a new one.
+    /// If the session is running, queues the message for delivery when it finishes.
+    /// If the session is completed/failed, resumes it with the message.
+    /// Multiple pushes accumulate — all queued messages are delivered together.
+    Push {
+        /// Session name (required — this is the stable handle for the work stream)
+        name: String,
+        /// Message to send to the agent
+        prompt: String,
+        /// Working directory for the sub-agent (default: current dir)
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        /// Cancel all queued messages for this session
+        #[arg(long)]
         cancel: bool,
+    },
+    /// Interrupt a running session: kill it, clear the queue, and resume with a new message.
+    Interrupt {
+        /// Session name
+        name: String,
+        /// Message to send after killing
+        prompt: String,
+        /// Working directory for the sub-agent (default: current dir)
+        #[arg(long, default_value = ".")]
+        cwd: String,
     },
     /// List all sessions with their status (running, completed, failed)
     List {
@@ -130,19 +151,6 @@ pub enum Commands {
         /// Stream output as it's written (like tail -f)
         #[arg(long, short)]
         follow: bool,
-    },
-    /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
-    ///
-    /// Takes a session name, cq ID prefix, or raw Claude session ID.
-    Resume {
-        /// Session name, cq ID prefix, or full Claude session ID
-        session_id: String,
-        /// Follow-up prompt to send (default: "continue")
-        #[arg(default_value = "continue")]
-        prompt: String,
-        /// Working directory (default: current dir)
-        #[arg(long, default_value = ".")]
-        cwd: String,
     },
     /// Block until a session completes: cq wait <name-or-id>
     ///
