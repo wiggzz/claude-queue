@@ -10,16 +10,16 @@ use clap::{Parser, Subcommand};
 Orchestrate parallel coding-agent sub-agents with tool-call permission gating.
 
 QUICK START:
-  1. cq start \"fix the auth bug\" --name auth-fix --cwd ~/myproject
-  2. cq start \"add tests\" --name tests --cwd ~/myproject
+  1. cq push auth-fix \"fix the auth bug\" --cwd ~/myproject
+  2. cq push tests \"add tests\" --cwd ~/myproject
   3. cq pending                    # tool calls waiting for approval
   4. cq approve all                # approve everything pending
   5. cq list                       # check session statuses
   6. cq result auth-fix            # get final output (by name or ID prefix)
-  7. cq resume auth-fix \"now fix the edge case too\"
+  7. cq push auth-fix \"now fix the edge case too\"
 
 BEST PRACTICES FOR ORCHESTRATORS:
-  - Always use --name so you can refer to sessions later
+  - Use cq push <name> — it starts, queues, or resumes as needed
   - Use --cwd to set each sub-agent's working directory
   - For agents editing overlapping files, use git worktrees:
       git worktree add ../my-worktree && cq start \"...\" --cwd ../my-worktree
@@ -316,4 +316,22 @@ pub enum PolicyCommands {
 pub enum ConfigCommands {
     /// Show the effective merged configuration (user + project + defaults)
     Show,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_long_help_keeps_push_first_workflow() {
+        let mut cmd = Cli::command();
+        let mut rendered = Vec::new();
+        cmd.write_long_help(&mut rendered).unwrap();
+        let help = String::from_utf8(rendered).unwrap();
+
+        assert!(help.contains("cq push auth-fix \"fix the auth bug\" --cwd ~/myproject"));
+        assert!(help.contains("Use cq push <name>"));
+        assert!(help.contains("cq push auth-fix \"now fix the edge case too\""));
+    }
 }
