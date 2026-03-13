@@ -119,6 +119,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             command,
         } => {
             let db = open_db()?;
+            let session_names = db.get_session_names().unwrap_or_default();
 
             match command {
                 Some(PendingCommands::Show { id }) => {
@@ -155,9 +156,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                 println!("{}", tool_call_to_json(tc));
                             }
                         } else if full {
-                            print_pending_full(&existing);
+                            print_pending_full(&existing, &session_names);
                         } else {
-                            print_pending_table(&existing);
+                            print_pending_table(&existing, &session_names);
                         }
                         return Ok(());
                     }
@@ -179,7 +180,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                                     println!("{}", tool_call_to_json(tc));
                                 }
                             } else {
-                                print_pending_table(&new_calls);
+                                print_pending_table(&new_calls, &session_names);
                             }
                             return Ok(());
                         }
@@ -203,9 +204,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             println!("{}", tool_call_to_json(tc));
                         }
                     } else if full {
-                        print_pending_full(&pending);
+                        print_pending_full(&pending, &session_names);
                     } else {
-                        print_pending_table(&pending);
+                        print_pending_table(&pending, &session_names);
                     }
                 }
             }
@@ -1043,16 +1044,20 @@ fn open_db() -> Result<db::Db, Box<dyn std::error::Error>> {
     Ok(db::Db::open(&config::db_path())?)
 }
 
-fn print_pending_full(calls: &[db::ToolCall]) {
+fn print_pending_full(
+    calls: &[db::ToolCall],
+    session_names: &std::collections::HashMap<String, String>,
+) {
     for (i, tc) in calls.iter().enumerate() {
         if i > 0 {
             println!("{}", "-".repeat(60));
         }
         println!("ID:        {}", tc.id);
-        println!(
-            "Session:   {}",
-            &tc.session_id[..8.min(tc.session_id.len())]
-        );
+        let session_display = session_names
+            .get(&tc.session_id)
+            .map(|s| s.as_str())
+            .unwrap_or(&tc.session_id[..8.min(tc.session_id.len())]);
+        println!("Session:   {}", session_display);
         println!("Tool:      {}", tc.tool_name);
         if let Some(ref summary) = tc.summary {
             println!("Summary:   {summary}");
@@ -1067,12 +1072,19 @@ fn print_pending_full(calls: &[db::ToolCall]) {
     }
 }
 
-fn print_pending_table(calls: &[db::ToolCall]) {
+fn print_pending_table(
+    calls: &[db::ToolCall],
+    session_names: &std::collections::HashMap<String, String>,
+) {
     println!(
         "{:<6} {:<10} {:<15} {:<20} DESCRIPTION",
         "ID", "SESSION", "TOOL", "SINCE"
     );
     for tc in calls {
+        let session_display = session_names
+            .get(&tc.session_id)
+            .map(|s| s.as_str())
+            .unwrap_or(&tc.session_id[..8.min(tc.session_id.len())]);
         let description = if let Some(ref summary) = tc.summary {
             format!("\"{}\"", truncate_str(summary, 58))
         } else {
@@ -1080,11 +1092,7 @@ fn print_pending_table(calls: &[db::ToolCall]) {
         };
         println!(
             "{:<6} {:<10} {:<15} {:<20} {}",
-            tc.id,
-            &tc.session_id[..8.min(tc.session_id.len())],
-            tc.tool_name,
-            &tc.created_at,
-            description,
+            tc.id, session_display, tc.tool_name, &tc.created_at, description,
         );
     }
 }
