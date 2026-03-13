@@ -65,6 +65,10 @@ pub struct Config {
     pub timeout: u64,
     #[serde(default = "default_poll_interval")]
     pub poll_interval: f64,
+    /// Model to use for sessions (e.g. "haiku", "sonnet", "opus"). Empty means claude default.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
     #[serde(default)]
     pub policies: Vec<Policy>,
     #[serde(default)]
@@ -76,6 +80,7 @@ impl Default for Config {
         Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
+            model: String::new(),
             policies: Vec::new(),
             supervisor: SupervisorConfig::default(),
         }
@@ -110,6 +115,13 @@ impl Config {
             user_config.poll_interval
         };
 
+        // Model: project config wins if set, then user config
+        let model = if !project_config.model.is_empty() {
+            project_config.model
+        } else {
+            user_config.model
+        };
+
         // Project policies first (higher priority), then user policies
         let mut policies = project_config.policies;
         policies.extend(user_config.policies);
@@ -142,6 +154,7 @@ impl Config {
         Config {
             timeout,
             poll_interval,
+            model,
             policies,
             supervisor,
         }
@@ -346,6 +359,7 @@ pub fn ensure_user_config() {
         let config = Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
+            model: String::new(),
             policies: vec![
                 Policy {
                     tool: "Read".into(),
@@ -438,6 +452,7 @@ mod tests {
         let config = Config {
             timeout: 999,
             poll_interval: 1.5,
+            model: String::new(),
             policies: vec![Policy {
                 tool: "Write".into(),
                 action: "ask".into(),

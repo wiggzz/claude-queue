@@ -52,6 +52,8 @@ pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn s
             .find_map(|(_, c)| c.as_deref())
             .unwrap_or(cwd);
         let session_id = resume_session(name, &sess, &combined_prompt, resume_cwd)?;
+        // Reset the old session's status back from "delivering"
+        let _ = db.update_session_status(&sess.session_id, &sess.status, sess._exit_code);
         return Ok(PushResult::Resumed(session_id));
     }
 
@@ -71,21 +73,8 @@ pub fn interrupt(
         .find_session(name)?
         .ok_or_else(|| format!("No session found: {name}"))?;
 
-    // Kill the running session if alive.
-    // The PID may not be set yet if run-session hasn't spawned claude — wait briefly.
-    let mut pid = sess.pid;
-    if pid.is_none() && sess.status == "running" {
-        for _ in 0..10 {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            if let Some(refreshed) = db.find_session(name)?
-                && refreshed.pid.is_some()
-            {
-                pid = refreshed.pid;
-                break;
-            }
-        }
-    }
-    if let Some(pid) = pid
+    // Kill the running session if alive
+    if let Some(pid) = sess.pid
         && pid > 0
         && is_pid_alive(pid)
     {
@@ -143,12 +132,15 @@ pub fn start(
 }
 
 /// Resume a session by name, using the claude_session_id from a previous session.
+/// Always resumes from the previous session's cwd to maintain the same claude project context.
+/// The `cwd` parameter is ignored — we use prev_session's stored cwd instead.
 fn resume_session(
     name: &str,
     prev_session: &crate::db::Session,
     prompt: &str,
-    cwd: &str,
+    _cwd: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let cwd = &prev_session._cwd;
     let claude_sid = prev_session
         .claude_session_id
         .clone()
@@ -232,6 +224,20 @@ fn launch(
         .stderr(wrapper_stderr_file)
         .spawn()?;
 
+    // Wait for the wrapper to spawn claude and set the PID before returning.
+    // This ensures that by the time push/start returns, the session is fully set up
+    // and interrupt/kill can work immediately without polling.
+    for _ in 0..100 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let check_db = Db::open(&db_path)?;
+        if let Some(sess) = check_db.find_session(session_id)?
+            && sess.pid.is_some()
+        {
+            return Ok(session_id.to_string());
+        }
+    }
+
+    // Wrapper didn't set PID within 5s — return anyway, something may be wrong
     Ok(session_id.to_string())
 }
 
@@ -272,8 +278,14 @@ pub fn run_session(
     });
     let settings_str = serde_json::to_string(&settings)?;
 
+    // Load config for model setting
+    let config = crate::config::Config::load(&project_root);
+
     let mut cmd = Command::new("claude");
     cmd.args(&claude_args);
+    if !config.model.is_empty() {
+        cmd.args(["--model", &config.model]);
+    }
     let mut child = cmd
         .args([
             "--settings",
@@ -302,20 +314,27 @@ pub fn run_session(
 
     // Wait for claude to exit (we are its direct parent, so this is proper waitpid)
     let status = child.wait();
-    match status {
+    let (final_status, exit_code) = match status {
         Ok(s) => {
             let code = s.code();
+            eprintln!(
+                "[run-session {session_id}] claude exited: code={code:?}, success={}",
+                s.success()
+            );
             let st = if code == Some(0) {
                 "completed"
             } else {
                 "failed"
             };
             let _ = db.update_session_status(session_id, st, code);
+            (st, code)
         }
-        Err(_) => {
+        Err(e) => {
+            eprintln!("[run-session {session_id}] wait error: {e}");
             let _ = db.update_session_status(session_id, "failed", None);
+            ("failed", None)
         }
-    }
+    };
 
     // Atomically claim the session for delivery — prevents race with concurrent `cq push`
     if let Some(name) = name {
@@ -324,7 +343,10 @@ pub fn run_session(
             return Ok(());
         }
         let messages = db.take_all_queued_messages(name)?;
-        if !messages.is_empty() {
+        if messages.is_empty() {
+            // No queued messages — reset status back from "delivering"
+            let _ = db.update_session_status(session_id, final_status, exit_code);
+        } else {
             let combined_prompt = messages
                 .iter()
                 .map(|(p, _)| p.as_str())
@@ -342,9 +364,12 @@ pub fn run_session(
             if let Some(sess) = db.find_session(name)? {
                 match resume_session(name, &sess, &combined_prompt, resume_cwd) {
                     Ok(new_id) => {
+                        // Reset this session's status now that delivery succeeded
+                        let _ = db.update_session_status(session_id, final_status, exit_code);
                         eprintln!("Queued messages delivered: session {name} resumed ({new_id})");
                     }
                     Err(e) => {
+                        let _ = db.update_session_status(session_id, final_status, exit_code);
                         eprintln!("Failed to deliver queued messages for session {name}: {e}");
                     }
                 }
