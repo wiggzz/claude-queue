@@ -27,7 +27,9 @@ fn get_cq_managed_ids() -> HashSet<String> {
         && let Ok(sessions) = db.get_sessions()
     {
         for s in sessions {
-            if let Some(claude_id) = s.claude_session_id {
+            if s.agent_backend == crate::backend::AgentBackend::Claude
+                && let Some(claude_id) = s.agent_session_id.or(s.claude_session_id)
+            {
                 ids.insert(claude_id);
             }
         }

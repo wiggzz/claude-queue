@@ -1,24 +1,25 @@
+use crate::backend::AgentBackend;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "cq",
     version,
-    about = "Claude Queue — orchestrate multiple Claude Code sub-agent sessions",
+    about = "Claude Queue — orchestrate coding-agent sub-agent sessions",
     long_about = "\
-Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
+Orchestrate parallel coding-agent sub-agents with tool-call permission gating.
 
 QUICK START:
-  1. cq push auth-fix \"fix the auth bug\" --cwd ~/myproject
-  2. cq push tests \"add tests\" --cwd ~/myproject
+  1. cq start \"fix the auth bug\" --name auth-fix --cwd ~/myproject
+  2. cq start \"add tests\" --name tests --cwd ~/myproject
   3. cq pending                    # tool calls waiting for approval
   4. cq approve all                # approve everything pending
   5. cq list                       # check session statuses
   6. cq result auth-fix            # get final output (by name or ID prefix)
-  7. cq push auth-fix \"now fix the edge case too\"
+  7. cq resume auth-fix \"now fix the edge case too\"
 
 BEST PRACTICES FOR ORCHESTRATORS:
-  - Use cq push <name> — it starts, queues, or resumes as needed
+  - Always use --name so you can refer to sessions later
   - Use --cwd to set each sub-agent's working directory
   - For agents editing overlapping files, use git worktrees:
       git worktree add ../my-worktree && cq start \"...\" --cwd ../my-worktree
@@ -52,12 +53,15 @@ pub enum Commands {
     Start {
         /// The prompt to send to the sub-agent
         prompt: String,
-        /// Friendly name for this session
+        /// Friendly name for this session (used with resume, result, etc.)
         #[arg(long, short)]
         name: Option<String>,
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Backend to use (default: --backend, CQ_AGENT_BACKEND, config default_backend, then claude)
+        #[arg(long, value_enum)]
+        backend: Option<AgentBackend>,
     },
     /// Push a message to a session: starts, queues, or resumes as needed.
     ///
@@ -152,6 +156,22 @@ pub enum Commands {
         #[arg(long, short)]
         follow: bool,
     },
+    /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
+    ///
+    /// Takes a session name, cq ID prefix, or raw backend session ID.
+    Resume {
+        /// Session name, cq ID prefix, or full backend session ID
+        session_id: String,
+        /// Follow-up prompt to send (default: "continue")
+        #[arg(default_value = "continue")]
+        prompt: String,
+        /// Working directory (default: current dir)
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        /// Backend to use for raw external session IDs
+        #[arg(long, value_enum)]
+        backend: Option<AgentBackend>,
+    },
     /// Block until a session completes: cq wait <name-or-id>
     ///
     /// WARNING: This is blocking! Only use in background tasks or scripts,
@@ -168,7 +188,7 @@ pub enum Commands {
     },
     /// Live dashboard: sessions + pending approvals, refreshes every 2s
     Watch,
-    /// Discover and search non-cq-managed Claude Code sessions
+    /// Discover and search non-cq-managed Claude Code sessions (Claude-only)
     Sessions {
         #[command(subcommand)]
         command: SessionsCommands,
@@ -211,30 +231,28 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// [internal] Hook entry point called by Claude Code's PreToolUse system
+    /// [internal] Hook entry point called by backend-specific tool interception
     #[command(hide = true)]
-    Hook,
-    /// [internal] Spawn claude, wait for it to exit, update DB, and deliver queued messages.
-    /// This is the session wrapper process — it is the direct parent of claude.
+    Hook {
+        #[arg(default_value = "claude")]
+        backend: String,
+    },
+    /// [internal] Background session runner
     #[command(hide = true)]
     RunSession {
-        /// CQ session ID (already registered in DB)
         session_id: String,
-        /// Claude session ID (for --session-id or --resume)
+        #[arg(long, value_enum)]
+        backend: AgentBackend,
         #[arg(long)]
-        claude_session_id: Option<String>,
-        /// Session name (for queue delivery)
-        #[arg(long)]
-        name: Option<String>,
-        /// Working directory
+        agent_session_id: String,
         #[arg(long)]
         cwd: String,
-        /// Prompt display string (for DB)
         #[arg(long)]
         prompt_display: String,
-        /// Arguments to pass to claude
-        #[arg(last = true)]
-        claude_args: Vec<String>,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -249,7 +267,7 @@ pub enum PendingCommands {
 
 #[derive(Subcommand)]
 pub enum SessionsCommands {
-    /// List recent Claude Code sessions (not managed by cq)
+    /// List recent Claude Code sessions (not managed by cq, Claude-only)
     List {
         /// Maximum number of sessions to show
         #[arg(long, short, default_value = "20")]

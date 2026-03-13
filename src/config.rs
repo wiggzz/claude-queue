@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,11 +32,8 @@ fn is_default_match_mode(mode: &MatchMode) -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupervisorConfig {
-    #[serde(default)]
     pub enabled: bool,
-    #[serde(default = "default_supervisor_model")]
     pub model: String,
-    #[serde(default)]
     pub rules: Vec<String>,
     /// Whether to include the agent's session prompt/task in the supervisor context.
     /// Default: false. When false, the supervisor evaluates tool calls purely on their
@@ -59,20 +57,36 @@ fn default_supervisor_model() -> String {
     "haiku".into()
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawSupervisorConfig {
+    pub enabled: Option<bool>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub rules: Vec<String>,
+    pub include_session_context: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    #[serde(default = "default_timeout")]
     pub timeout: u64,
-    #[serde(default = "default_poll_interval")]
     pub poll_interval: f64,
-    /// Model to use for sessions (e.g. "haiku", "sonnet", "opus"). Empty means claude default.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "String::is_empty")]
+    /// Model to use for Claude sessions (empty means backend default).
     pub model: String,
+    pub default_backend: AgentBackend,
+    pub policies: Vec<Policy>,
+    pub supervisor: SupervisorConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawConfig {
+    pub timeout: Option<u64>,
+    pub poll_interval: Option<f64>,
+    pub model: Option<String>,
+    pub default_backend: Option<AgentBackend>,
     #[serde(default)]
     pub policies: Vec<Policy>,
     #[serde(default)]
-    pub supervisor: SupervisorConfig,
+    pub supervisor: RawSupervisorConfig,
 }
 
 impl Default for Config {
@@ -81,6 +95,7 @@ impl Default for Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
             model: String::new(),
+            default_backend: AgentBackend::default(),
             policies: Vec::new(),
             supervisor: SupervisorConfig::default(),
         }
@@ -100,31 +115,28 @@ impl Config {
     /// Project policies come first (higher priority, first-match-wins).
     /// Claude Code permission settings are appended as lowest-priority fallback policies.
     pub fn load(project_dir: &Path) -> Self {
-        let user_config = Self::load_single(&user_config_path());
-        let project_config = Self::load_single(&project_config_path(project_dir));
+        let user_config = Self::load_single_raw(&user_config_path());
+        let project_config = Self::load_single_raw(&project_config_path(project_dir));
 
-        let timeout = if project_config.timeout != default_timeout() {
-            project_config.timeout
-        } else {
-            user_config.timeout
-        };
+        let timeout = project_config
+            .timeout
+            .or(user_config.timeout)
+            .unwrap_or_else(default_timeout);
 
-        let poll_interval = if project_config.poll_interval != default_poll_interval() {
-            project_config.poll_interval
-        } else {
-            user_config.poll_interval
-        };
+        let poll_interval = project_config
+            .poll_interval
+            .or(user_config.poll_interval)
+            .unwrap_or_else(default_poll_interval);
 
-        // Model: project config wins if set, then user config
-        let model = if !project_config.model.is_empty() {
-            project_config.model
-        } else {
-            user_config.model
-        };
+        let model = project_config
+            .model
+            .clone()
+            .or(user_config.model.clone())
+            .unwrap_or_default();
 
         // Project policies first (higher priority), then user policies
-        let mut policies = project_config.policies;
-        policies.extend(user_config.policies);
+        let mut policies = project_config.policies.clone();
+        policies.extend(user_config.policies.clone());
 
         // Append Claude Code permission-derived policies as lowest-priority fallback.
         // This makes cq work OOTB without separate config — if Claude Code trusts a tool,
@@ -134,36 +146,66 @@ impl Config {
 
         // Supervisor: project config wins for enabled/model, rules are merged (project first)
         let supervisor = SupervisorConfig {
-            enabled: project_config.supervisor.enabled || user_config.supervisor.enabled,
-            model: if !project_config.supervisor.model.is_empty()
-                && project_config.supervisor.model != default_supervisor_model()
-            {
-                project_config.supervisor.model
-            } else {
-                user_config.supervisor.model
-            },
+            enabled: project_config
+                .supervisor
+                .enabled
+                .or(user_config.supervisor.enabled)
+                .unwrap_or(false),
+            model: project_config
+                .supervisor
+                .model
+                .clone()
+                .or(user_config.supervisor.model.clone())
+                .unwrap_or_else(default_supervisor_model),
             rules: {
-                let mut rules = project_config.supervisor.rules;
-                rules.extend(user_config.supervisor.rules);
+                let mut rules = project_config.supervisor.rules.clone();
+                rules.extend(user_config.supervisor.rules.clone());
                 rules
             },
-            include_session_context: project_config.supervisor.include_session_context
-                || user_config.supervisor.include_session_context,
+            include_session_context: project_config
+                .supervisor
+                .include_session_context
+                .or(user_config.supervisor.include_session_context)
+                .unwrap_or(false),
         };
 
         Config {
             timeout,
             poll_interval,
             model,
+            default_backend: project_config
+                .default_backend
+                .or(user_config.default_backend)
+                .unwrap_or_default(),
             policies,
             supervisor,
         }
     }
 
     fn load_single(path: &Path) -> Self {
+        let raw = Self::load_single_raw(path);
+        Config {
+            timeout: raw.timeout.unwrap_or_else(default_timeout),
+            poll_interval: raw.poll_interval.unwrap_or_else(default_poll_interval),
+            model: raw.model.unwrap_or_default(),
+            default_backend: raw.default_backend.unwrap_or_default(),
+            policies: raw.policies,
+            supervisor: SupervisorConfig {
+                enabled: raw.supervisor.enabled.unwrap_or(false),
+                model: raw
+                    .supervisor
+                    .model
+                    .unwrap_or_else(default_supervisor_model),
+                rules: raw.supervisor.rules,
+                include_session_context: raw.supervisor.include_session_context.unwrap_or(false),
+            },
+        }
+    }
+
+    fn load_single_raw(path: &Path) -> RawConfig {
         match fs::read_to_string(path) {
             Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Config::default(),
+            Err(_) => RawConfig::default(),
         }
     }
 
@@ -180,6 +222,10 @@ impl Config {
 /// Load a single config file (for editing project or user config directly).
 pub fn load_file(path: &Path) -> Config {
     Config::load_single(path)
+}
+
+pub(crate) fn load_file_raw(path: &Path) -> RawConfig {
+    Config::load_single_raw(path)
 }
 
 pub fn user_config_path() -> PathBuf {
@@ -203,11 +249,6 @@ pub fn log_dir() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
-    // CQ_HOME overrides where cq stores its data (~/.cq/).
-    // Useful for testing without affecting real data or breaking claude's auth.
-    if let Ok(path) = std::env::var("CQ_HOME") {
-        return PathBuf::from(path);
-    }
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -365,6 +406,7 @@ pub fn ensure_user_config() {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
             model: String::new(),
+            default_backend: AgentBackend::default(),
             policies: vec![
                 Policy {
                     tool: "Read".into(),
@@ -380,6 +422,12 @@ pub fn ensure_user_config() {
                 },
                 Policy {
                     tool: "Grep".into(),
+                    action: "allow".into(),
+                    pattern: None,
+                    match_mode: MatchMode::default(),
+                },
+                Policy {
+                    tool: "LS".into(),
                     action: "allow".into(),
                     pattern: None,
                     match_mode: MatchMode::default(),
@@ -419,6 +467,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.timeout, 86400);
         assert!((c.poll_interval - 0.5).abs() < f64::EPSILON);
+        assert_eq!(c.default_backend, AgentBackend::Claude);
         assert!(c.policies.is_empty());
         assert!(!c.supervisor.enabled);
         assert_eq!(c.supervisor.model, "haiku");
@@ -429,16 +478,18 @@ mod tests {
         let c = Config::load_single(Path::new("/tmp/nonexistent_cq_config_test.json"));
         assert_eq!(c.timeout, 86400);
         assert!((c.poll_interval - 0.5).abs() < f64::EPSILON);
+        assert_eq!(c.default_backend, AgentBackend::Claude);
         assert!(c.policies.is_empty());
     }
 
     #[test]
     fn test_load_valid_config() {
         let mut f = NamedTempFile::new().unwrap();
-        write!(f, r#"{{"timeout": 300, "poll_interval": 2.0, "policies": [{{"tool": "Bash", "action": "deny"}}], "supervisor": {{"enabled": true, "model": "opus", "rules": ["no secrets"]}}}}"#).unwrap();
+        write!(f, r#"{{"timeout": 300, "poll_interval": 2.0, "default_backend": "pi", "policies": [{{"tool": "Bash", "action": "deny"}}], "supervisor": {{"enabled": true, "model": "opus", "rules": ["no secrets"]}}}}"#).unwrap();
         let c = Config::load_single(f.path());
         assert_eq!(c.timeout, 300);
         assert!((c.poll_interval - 2.0).abs() < f64::EPSILON);
+        assert_eq!(c.default_backend, AgentBackend::Pi);
         assert_eq!(c.policies.len(), 1);
         assert_eq!(c.policies[0].tool, "Bash");
         assert_eq!(c.policies[0].action, "deny");
@@ -464,6 +515,7 @@ mod tests {
             timeout: 999,
             poll_interval: 1.5,
             model: String::new(),
+            default_backend: AgentBackend::Pi,
             policies: vec![Policy {
                 tool: "Write".into(),
                 action: "ask".into(),
@@ -481,6 +533,7 @@ mod tests {
         let loaded = Config::load_single(&path);
         assert_eq!(loaded.timeout, 999);
         assert!((loaded.poll_interval - 1.5).abs() < f64::EPSILON);
+        assert_eq!(loaded.default_backend, AgentBackend::Pi);
         assert_eq!(loaded.policies.len(), 1);
         assert_eq!(loaded.policies[0].pattern, Some("secret".into()));
         assert!(loaded.supervisor.enabled);
@@ -642,5 +695,85 @@ mod tests {
         // High priority file's policies come first
         assert_eq!(policies[0].tool, "Write");
         assert_eq!(policies[1].tool, "Read");
+    }
+
+    #[test]
+    fn test_load_project_false_overrides_user_true() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set("HOME", home.path().to_str());
+
+        fs::create_dir_all(home.path().join(".cq")).unwrap();
+        fs::write(
+            home.path().join(".cq").join("config.json"),
+            r#"{"supervisor":{"enabled":true,"include_session_context":true},"default_backend":"pi"}"#,
+        )
+        .unwrap();
+
+        fs::create_dir_all(project.path().join(".cq")).unwrap();
+        fs::write(
+            project.path().join(".cq").join("config.json"),
+            r#"{"supervisor":{"enabled":false,"include_session_context":false},"default_backend":"claude"}"#,
+        )
+        .unwrap();
+
+        let loaded = Config::load(project.path());
+        assert!(!loaded.supervisor.enabled);
+        assert!(!loaded.supervisor.include_session_context);
+        assert_eq!(loaded.default_backend, AgentBackend::Claude);
+    }
+
+    #[test]
+    fn test_load_project_explicit_default_value_overrides_user_non_default() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set("HOME", home.path().to_str());
+
+        fs::create_dir_all(home.path().join(".cq")).unwrap();
+        fs::write(
+            home.path().join(".cq").join("config.json"),
+            r#"{"timeout":123,"poll_interval":9.5}"#,
+        )
+        .unwrap();
+
+        fs::create_dir_all(project.path().join(".cq")).unwrap();
+        fs::write(
+            project.path().join(".cq").join("config.json"),
+            format!(
+                r#"{{"timeout":{},"poll_interval":{}}}"#,
+                default_timeout(),
+                default_poll_interval()
+            ),
+        )
+        .unwrap();
+
+        let loaded = Config::load(project.path());
+        assert_eq!(loaded.timeout, default_timeout());
+        assert!((loaded.poll_interval - default_poll_interval()).abs() < f64::EPSILON);
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: Option<&str>) -> Self {
+            let previous = std::env::var(key).ok();
+            match value {
+                Some(value) => unsafe { std::env::set_var(key, value) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+            EnvGuard { key, previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(self.key, value) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 }
