@@ -38,6 +38,8 @@ POLICIES & SUPERVISOR:
   View active stack: cq policy list
 
 MONITORING:
+  cq tail               Show recent messages from running sessions
+  cq tail -s <name> -f  Follow a session's output in real-time
   cq watch              Live dashboard (sessions + pending approvals)
   cq audit --follow     Real-time decision log (run in a background task)"
 )]
@@ -148,13 +150,24 @@ pub enum Commands {
         /// Session ID (prefix match — first 8 chars is enough)
         session_id: String,
     },
-    /// View the raw output log, optionally following in real-time
-    Output {
-        /// Session ID (prefix match)
-        session_id: String,
-        /// Stream output as it's written (like tail -f)
+    /// Show recent session messages (like tail for your agents)
+    ///
+    /// Without --session, shows messages from all running sessions.
+    /// With --session, shows messages from all sessions matching that name/ID.
+    /// Use --follow to keep streaming new messages as they arrive.
+    Tail {
+        /// Filter by session name or ID prefix
+        #[arg(long, short)]
+        session: Option<String>,
+        /// Number of recent messages to show (default: 20)
+        #[arg(short = 'n', long, default_value = "20")]
+        num: usize,
+        /// Keep streaming new messages as they arrive
         #[arg(long, short)]
         follow: bool,
+        /// Output as JSON Lines
+        #[arg(long)]
+        json: bool,
     },
     /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
     ///
