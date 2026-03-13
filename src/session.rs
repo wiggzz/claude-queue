@@ -135,7 +135,7 @@ fn resume_session(
     let cq_session_id = uuid::Uuid::new_v4().to_string();
     let args = vec![
         "-p".to_string(),
-        "--session-id".to_string(),
+        "--resume".to_string(),
         claude_sid.clone(),
         prompt.to_string(),
     ];
