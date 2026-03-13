@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/wiggzz/claude-queue/compare/v0.6.0...v0.7.0) (2026-03-13)
+
+
+### Features
+
+* add cq push/interrupt as unified session commands ([#19](https://github.com/wiggzz/claude-queue/issues/19)) ([53adbd0](https://github.com/wiggzz/claude-queue/commit/53adbd05ba34c0635ef18b6e6265ce8cf1891d23))
+
 ## [0.6.0](https://github.com/wiggzz/claude-queue/compare/v0.5.0...v0.6.0) (2026-03-13)
 
 
