@@ -203,6 +203,11 @@ pub fn log_dir() -> PathBuf {
 }
 
 fn dirs_home() -> PathBuf {
+    // CQ_HOME overrides where cq stores its data (~/.cq/).
+    // Useful for testing without affecting real data or breaking claude's auth.
+    if let Ok(path) = std::env::var("CQ_HOME") {
+        return PathBuf::from(path);
+    }
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))

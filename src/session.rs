@@ -22,6 +22,18 @@ pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn s
     let db = Db::open(&config::db_path())?;
 
     if let Some(sess) = db.find_session(name)? {
+        // Warn if the provided cwd differs from the session's original cwd.
+        // Claude stores sessions per-project, so resume always uses the original cwd.
+        if let Ok(cwd_abs) = fs::canonicalize(cwd) {
+            if cwd_abs.to_string_lossy() != sess._cwd {
+                eprintln!(
+                    "warning: --cwd '{}' differs from session's original cwd '{}'. Resume will use the original cwd.",
+                    cwd_abs.display(),
+                    sess._cwd,
+                );
+            }
+        }
+
         let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
         if (sess.status == "running" && alive) || sess.status == "delivering" {
             // Session is running or wrapper is delivering queued messages — queue this message.
@@ -241,6 +253,33 @@ fn launch(
     Ok(session_id.to_string())
 }
 
+/// Wait for a child process to exit. Returns (status_str, exit_code) without updating DB.
+fn wait_for_child(
+    session_id: &str,
+    child: &mut std::process::Child,
+) -> Result<(&'static str, Option<i32>), Box<dyn std::error::Error>> {
+    let status = child.wait();
+    match status {
+        Ok(s) => {
+            let code = s.code();
+            eprintln!(
+                "[run-session {session_id}] claude exited: code={code:?}, success={}",
+                s.success()
+            );
+            let st = if code == Some(0) {
+                "completed"
+            } else {
+                "failed"
+            };
+            Ok((st, code))
+        }
+        Err(e) => {
+            eprintln!("[run-session {session_id}] wait error: {e}");
+            Ok(("failed", None))
+        }
+    }
+}
+
 /// Run a session: spawn claude as a child process, wait for it, update DB, deliver queued messages.
 /// This is invoked as `cq run-session` — a background wrapper process that is the direct parent of claude.
 pub fn run_session(
@@ -257,9 +296,7 @@ pub fn run_session(
     fs::create_dir_all(&log_dir)?;
 
     let log_path = log_dir.join(format!("{session_id}.log"));
-    let log_file = fs::File::create(&log_path)?;
     let stderr_path = log_dir.join(format!("{session_id}.stderr"));
-    let stderr_file = fs::File::create(&stderr_path)?;
 
     // Build the hook settings JSON
     let cq_bin = std::env::current_exe().unwrap_or_else(|_| "cq".into());
@@ -281,60 +318,88 @@ pub fn run_session(
     // Load config for model setting
     let config = crate::config::Config::load(&project_root);
 
-    let mut cmd = Command::new("claude");
-    cmd.args(&claude_args);
-    if !config.model.is_empty() {
-        cmd.args(["--model", &config.model]);
-    }
-    let mut child = cmd
-        .args([
-            "--settings",
-            &settings_str,
-            "--permission-mode",
-            "bypassPermissions",
-            "--dangerously-skip-permissions",
-        ])
-        .env("CQ_MANAGED", "1")
-        .env("CQ_DB", db_path.to_string_lossy().as_ref())
-        .env("CQ_PROJECT_DIR", project_root.to_string_lossy().as_ref())
-        .env("CQ_SESSION_CWD", cwd_abs.to_string_lossy().as_ref())
-        .env("CQ_SESSION_NAME", name.unwrap_or(""))
-        .env("CQ_SESSION_PROMPT", prompt_display)
-        .env_remove("CLAUDECODE")
-        .current_dir(&cwd_abs)
-        .stdout(log_file)
-        .stderr(stderr_file)
-        .spawn()?;
+    // Shared helper: spawn claude with given args and common env/settings
+    let spawn_claude = |args: &[String],
+                        log_path: &std::path::Path,
+                        stderr_path: &std::path::Path|
+     -> Result<std::process::Child, Box<dyn std::error::Error>> {
+        let log_file = fs::File::create(log_path)?;
+        let stderr_file = fs::File::create(stderr_path)?;
+        let mut cmd = Command::new("claude");
+        cmd.args(args);
+        if !config.model.is_empty() {
+            cmd.args(["--model", &config.model]);
+        }
+        let child = cmd
+            .args([
+                "--settings",
+                &settings_str,
+                "--permission-mode",
+                "bypassPermissions",
+                "--dangerously-skip-permissions",
+            ])
+            .env("CQ_MANAGED", "1")
+            .env("CQ_DB", db_path.to_string_lossy().as_ref())
+            .env("CQ_PROJECT_DIR", project_root.to_string_lossy().as_ref())
+            .env("CQ_SESSION_CWD", cwd_abs.to_string_lossy().as_ref())
+            .env("CQ_SESSION_NAME", name.unwrap_or(""))
+            .env("CQ_SESSION_PROMPT", prompt_display)
+            .env_remove("CLAUDECODE")
+            .current_dir(&cwd_abs)
+            .stdout(log_file)
+            .stderr(stderr_file)
+            .spawn()?;
+        Ok(child)
+    };
 
-    let pid = child.id();
-
-    // Update PID in DB now that claude is running
+    let mut child = spawn_claude(&claude_args, &log_path, &stderr_path)?;
     let db = Db::open(&db_path)?;
-    db.update_session_pid(session_id, pid)?;
+    db.update_session_pid(session_id, child.id())?;
 
     // Wait for claude to exit (we are its direct parent, so this is proper waitpid)
-    let status = child.wait();
-    let (final_status, exit_code) = match status {
-        Ok(s) => {
-            let code = s.code();
+    let (mut final_status, mut exit_code) = wait_for_child(session_id, &mut child)?;
+
+    // If claude failed because the session doesn't exist (e.g., killed before saving),
+    // retry as a fresh session without --resume.
+    // Don't update DB status yet — we might retry, and setting "failed" transiently
+    // could confuse polling clients.
+    if final_status == "failed" && claude_args.contains(&"--resume".to_string()) {
+        let stderr_content = fs::read_to_string(&stderr_path).unwrap_or_default();
+        if stderr_content.contains("No conversation found")
+            || stderr_content.contains("Session not found")
+        {
             eprintln!(
-                "[run-session {session_id}] claude exited: code={code:?}, success={}",
-                s.success()
+                "[run-session {session_id}] Resume failed (session not found), retrying as fresh session..."
             );
-            let st = if code == Some(0) {
-                "completed"
-            } else {
-                "failed"
+            // Build fresh args: remove --resume <id>, keep everything else
+            let fresh_args: Vec<String> = {
+                let mut out = Vec::new();
+                let mut skip_next = false;
+                for arg in &claude_args {
+                    if skip_next {
+                        skip_next = false;
+                        continue;
+                    }
+                    if arg == "--resume" {
+                        skip_next = true;
+                        continue;
+                    }
+                    out.push(arg.clone());
+                }
+                out
             };
-            let _ = db.update_session_status(session_id, st, code);
-            (st, code)
+
+            let mut child = spawn_claude(&fresh_args, &log_path, &stderr_path)?;
+            db.update_session_pid(session_id, child.id())?;
+
+            let result = wait_for_child(session_id, &mut child)?;
+            final_status = result.0;
+            exit_code = result.1;
         }
-        Err(e) => {
-            eprintln!("[run-session {session_id}] wait error: {e}");
-            let _ = db.update_session_status(session_id, "failed", None);
-            ("failed", None)
-        }
-    };
+    }
+
+    // Now update the DB with the final status (after any retries)
+    let _ = db.update_session_status(session_id, final_status, exit_code);
 
     // Atomically claim the session for delivery — prevents race with concurrent `cq push`
     if let Some(name) = name {
