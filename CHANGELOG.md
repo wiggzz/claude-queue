@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/wiggzz/claude-queue/compare/v0.4.0...v0.5.0) (2026-03-13)
+
+
+### Features
+
+* add cq gc for session expiration and database cleanup ([#13](https://github.com/wiggzz/claude-queue/issues/13)) ([69da92c](https://github.com/wiggzz/claude-queue/commit/69da92cad96f6faa065447bc7dc64aa249fd0c25))
+
 ## [0.4.0](https://github.com/wiggzz/claude-queue/compare/v0.3.0...v0.4.0) (2026-03-12)
 
 
