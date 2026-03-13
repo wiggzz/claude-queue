@@ -41,19 +41,60 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run()?;
         }
 
+        Commands::RunSession {
+            session_id,
+            claude_session_id: _,
+            name,
+            cwd,
+            prompt_display,
+            claude_args,
+        } => {
+            session::run_session(
+                &session_id,
+                name.as_deref(),
+                &cwd,
+                &prompt_display,
+                claude_args,
+            )?;
+        }
+
         Commands::Start { prompt, name, cwd } => {
             let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
             let display = name.as_deref().unwrap_or(&session_id[..8]);
             println!("Started session: {display} ({session_id})");
         }
 
-        Commands::Resume {
-            session_id,
+        Commands::Push {
+            name,
             prompt,
             cwd,
+            cancel,
         } => {
-            let new_session_id = session::resume(&session_id, &prompt, &cwd)?;
-            println!("Resumed session: {new_session_id}");
+            if cancel {
+                let count = session::cancel_queued(&name)?;
+                if count > 0 {
+                    println!("Cancelled {count} queued message(s) for session {name}.");
+                } else {
+                    println!("No queued messages for session {name}.");
+                }
+            } else {
+                match session::push(&prompt, &name, &cwd)? {
+                    session::PushResult::Started(session_id) => {
+                        println!("Started session: {name} ({session_id})");
+                    }
+                    session::PushResult::Queued => {
+                        println!("Queued message for running session: {name}");
+                    }
+                    session::PushResult::Resumed(session_id) => {
+                        println!("Resumed session: {name} ({session_id})");
+                    }
+                }
+            }
+        }
+
+        Commands::Interrupt { name, prompt, cwd } => {
+            let session_id = session::interrupt(&name, &prompt, &cwd)?;
+            println!("Interrupted and resumed session: {name} ({session_id})");
         }
 
         Commands::List { session, status } => {
@@ -71,7 +112,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let rows: Vec<_> = sessions
                 .iter()
                 .map(|s| {
-                    let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
+                    let alive = s.pid.map(session::is_pid_alive).unwrap_or(true);
                     let resolved_status = if s.status == "running" && !alive {
                         let resolved = session::resolve_dead_session(&db, &s.session_id);
                         if resolved == "completed" {
@@ -495,7 +536,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             // Resolve status of the most recent session
             let status = if last_sess.status == "running" {
-                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(true);
                 if !alive {
                     session::resolve_dead_session(&db, &last_sess.session_id)
                 } else {
@@ -553,7 +594,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             // Resolve status of the most recent session
             let status = if last_sess.status == "running" {
-                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(true);
                 if !alive {
                     session::resolve_dead_session(&db, &last_sess.session_id)
                 } else {
@@ -612,16 +653,18 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("No session matching '{session_id}'"))?;
             let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
 
-            // Check if already done
+            // Check if already done ("delivering" is transient — keep polling)
             let mut status = sess.status.clone();
             if status == "running" {
-                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
-                if !alive {
+                // pid=None means wrapper hasn't spawned claude yet — don't resolve as dead
+                if let Some(pid) = sess.pid
+                    && !session::is_pid_alive(pid)
+                {
                     status = session::resolve_dead_session(&db, &sess.session_id);
                 }
             }
 
-            if status != "running" {
+            if status != "running" && status != "delivering" {
                 // Already finished — print result and exit
                 print_session_result(&sess.session_id, &status)?;
                 if status != "completed" {
@@ -641,14 +684,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("Session disappeared from database")?;
 
                 let mut current_status = current.status.clone();
-                if current_status == "running" {
-                    let alive = current.pid.map(session::is_pid_alive).unwrap_or(false);
-                    if !alive {
-                        current_status = session::resolve_dead_session(&db, &current.session_id);
-                    }
+                if current_status == "running"
+                    && let Some(pid) = current.pid
+                    && !session::is_pid_alive(pid)
+                {
+                    current_status = session::resolve_dead_session(&db, &current.session_id);
                 }
 
-                if current_status != "running" {
+                if current_status != "running" && current_status != "delivering" {
                     print_session_result(&sess.session_id, &current_status)?;
                     if current_status != "completed" {
                         std::process::exit(1);

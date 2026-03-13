@@ -100,11 +100,25 @@ impl Db {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
         let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
+        // Queue table for push queuing (multiple messages per session)
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS queued_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                cwd TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )?;
+        // Migration: drop UNIQUE constraint if upgrading from old schema
+        // SQLite doesn't support DROP CONSTRAINT, but the table recreate handles it
+        // since we use CREATE TABLE IF NOT EXISTS with the new schema.
         Ok(Db { conn })
     }
 
     // --- Sessions ---
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_session(
         &self,
         session_id: &str,
@@ -112,11 +126,30 @@ impl Db {
         name: Option<&str>,
         prompt: &str,
         cwd: &str,
-        pid: u32,
+        pid: Option<u32>,
     ) -> rusqlite::Result<()> {
+        let pid_val: Option<i64> = pid.map(|p| p as i64);
         self.conn.execute(
             "INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, claude_session_id, name, prompt, cwd, pid as i64],
+            params![session_id, claude_session_id, name, prompt, cwd, pid_val],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically claim a session for queued message delivery by transitioning its status.
+    /// Returns true if this caller won the race (status was updated), false if someone else got there first.
+    pub fn claim_session_for_delivery(&self, session_id: &str) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET status = 'delivering' WHERE session_id = ?1 AND status IN ('completed', 'failed')",
+            params![session_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn update_session_pid(&self, session_id: &str, pid: u32) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET pid = ?1 WHERE session_id = ?2",
+            params![pid, session_id],
         )?;
         Ok(())
     }
@@ -312,6 +345,67 @@ impl Db {
         Ok(changed)
     }
 
+    // --- Queued Messages ---
+
+    /// Push a message onto the queue for a session name.
+    pub fn push_queued_message(
+        &self,
+        session_name: &str,
+        prompt: &str,
+        cwd: Option<&str>,
+    ) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "INSERT INTO queued_messages (session_name, prompt, cwd) VALUES (?1, ?2, ?3)",
+            params![session_name, prompt, cwd],
+        )?;
+        Ok(())
+    }
+
+    /// Take all queued messages for a session name (ordered by id ASC), deleting them.
+    /// Returns vec of (prompt, cwd) tuples.
+    pub fn take_all_queued_messages(
+        &self,
+        session_name: &str,
+    ) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
+            "SELECT prompt, cwd FROM queued_messages WHERE session_name = ?1 ORDER BY id ASC",
+        )?;
+        let rows: Vec<(String, Option<String>)> = stmt
+            .query_map(params![session_name], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        if !rows.is_empty() {
+            tx.execute(
+                "DELETE FROM queued_messages WHERE session_name = ?1",
+                params![session_name],
+            )?;
+        }
+        tx.commit()?;
+        Ok(rows)
+    }
+
+    /// Clear all queued messages for a session name. Returns count deleted.
+    pub fn clear_queued_messages(&self, session_name: &str) -> rusqlite::Result<usize> {
+        let changed = self.conn.execute(
+            "DELETE FROM queued_messages WHERE session_name = ?1",
+            params![session_name],
+        )?;
+        Ok(changed)
+    }
+
+    /// Check if any queued messages exist for a session name.
+    #[allow(dead_code)]
+    pub fn has_queued_messages(&self, session_name: &str) -> rusqlite::Result<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM queued_messages WHERE session_name = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![session_name])?;
+        Ok(rows.next()?.is_some())
+    }
+
     // --- GC ---
 
     pub fn get_running_sessions(&self) -> rusqlite::Result<Vec<Session>> {
@@ -391,7 +485,7 @@ mod tests {
     #[test]
     fn test_create_and_get_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "do stuff", "/tmp", 1234)
+        db.create_session("s1", None, None, "do stuff", "/tmp", Some(1234))
             .unwrap();
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -404,9 +498,9 @@ mod tests {
     #[test]
     fn test_find_session_by_name() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", 1)
+        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", Some(1))
             .unwrap();
-        db.create_session("s2", None, Some("beta"), "p2", "/tmp", 2)
+        db.create_session("s2", None, Some("beta"), "p2", "/tmp", Some(2))
             .unwrap();
         let found = db.find_session("alpha").unwrap().unwrap();
         assert_eq!(found.session_id, "s1");
@@ -418,11 +512,11 @@ mod tests {
     #[test]
     fn test_find_sessions_by_name_returns_all() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", Some(1))
             .unwrap();
-        db.create_session("s2", None, Some("other"), "p2", "/tmp", 2)
+        db.create_session("s2", None, Some("other"), "p2", "/tmp", Some(2))
             .unwrap();
-        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", 3)
+        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", Some(3))
             .unwrap();
 
         let sessions = db.find_sessions_by_name("mytask").unwrap();
@@ -441,7 +535,7 @@ mod tests {
     #[test]
     fn test_find_session_by_id_prefix() {
         let db = open_temp_db();
-        db.create_session("abc-123-def", None, None, "p", "/tmp", 1)
+        db.create_session("abc-123-def", None, None, "p", "/tmp", Some(1))
             .unwrap();
         let found = db.find_session("abc").unwrap().unwrap();
         assert_eq!(found.session_id, "abc-123-def");
@@ -451,7 +545,8 @@ mod tests {
     #[test]
     fn test_update_session_status() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p", "/tmp", 1).unwrap();
+        db.create_session("s1", None, None, "p", "/tmp", Some(1))
+            .unwrap();
         db.update_session_status("s1", "completed", Some(0))
             .unwrap();
         let sessions = db.get_sessions().unwrap();
@@ -640,13 +735,13 @@ mod tests {
     #[test]
     fn test_get_running_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p1", "/tmp", 1)
+        db.create_session("s1", None, None, "p1", "/tmp", Some(1))
             .unwrap();
-        db.create_session("s2", None, None, "p2", "/tmp", 2)
+        db.create_session("s2", None, None, "p2", "/tmp", Some(2))
             .unwrap();
         db.update_session_status("s2", "completed", Some(0))
             .unwrap();
-        db.create_session("s3", None, None, "p3", "/tmp", 3)
+        db.create_session("s3", None, None, "p3", "/tmp", Some(3))
             .unwrap();
         let running = db.get_running_sessions().unwrap();
         assert_eq!(running.len(), 2);
@@ -730,5 +825,64 @@ mod tests {
         assert_eq!(pending.len(), 2);
         assert_eq!(pending[0].summary.as_deref(), Some("Does something"));
         assert!(pending[1].summary.is_none());
+    }
+
+    #[test]
+    fn test_push_and_take_queued_messages() {
+        let db = open_temp_db();
+        db.push_queued_message("mytask", "do thing 1", Some("/tmp"))
+            .unwrap();
+        db.push_queued_message("mytask", "do thing 2", Some("/home"))
+            .unwrap();
+        assert!(db.has_queued_messages("mytask").unwrap());
+
+        let msgs = db.take_all_queued_messages("mytask").unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].0, "do thing 1");
+        assert_eq!(msgs[0].1.as_deref(), Some("/tmp"));
+        assert_eq!(msgs[1].0, "do thing 2");
+        assert_eq!(msgs[1].1.as_deref(), Some("/home"));
+
+        // take deletes them
+        assert!(!db.has_queued_messages("mytask").unwrap());
+        assert!(db.take_all_queued_messages("mytask").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_push_queued_message_no_cwd() {
+        let db = open_temp_db();
+        db.push_queued_message("mytask", "do thing", None).unwrap();
+        let msgs = db.take_all_queued_messages("mytask").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "do thing");
+        assert!(msgs[0].1.is_none());
+    }
+
+    #[test]
+    fn test_clear_queued_messages() {
+        let db = open_temp_db();
+        db.push_queued_message("mytask", "msg 1", Some("/tmp"))
+            .unwrap();
+        db.push_queued_message("mytask", "msg 2", None).unwrap();
+        assert_eq!(db.clear_queued_messages("mytask").unwrap(), 2);
+        assert!(!db.has_queued_messages("mytask").unwrap());
+        // Clear non-existent returns 0
+        assert_eq!(db.clear_queued_messages("mytask").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_queued_messages_independent_per_name() {
+        let db = open_temp_db();
+        db.push_queued_message("task-a", "prompt a", Some("/a"))
+            .unwrap();
+        db.push_queued_message("task-b", "prompt b", Some("/b"))
+            .unwrap();
+        assert!(db.has_queued_messages("task-a").unwrap());
+        assert!(db.has_queued_messages("task-b").unwrap());
+        assert!(!db.has_queued_messages("task-c").unwrap());
+
+        db.clear_queued_messages("task-a").unwrap();
+        assert!(!db.has_queued_messages("task-a").unwrap());
+        assert!(db.has_queued_messages("task-b").unwrap());
     }
 }

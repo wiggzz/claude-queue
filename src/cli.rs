@@ -9,16 +9,16 @@ use clap::{Parser, Subcommand};
 Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
 
 QUICK START:
-  1. cq start \"fix the auth bug\" --name auth-fix --cwd ~/myproject
-  2. cq start \"add tests\" --name tests --cwd ~/myproject
+  1. cq push auth-fix \"fix the auth bug\" --cwd ~/myproject
+  2. cq push tests \"add tests\" --cwd ~/myproject
   3. cq pending                    # tool calls waiting for approval
   4. cq approve all                # approve everything pending
   5. cq list                       # check session statuses
   6. cq result auth-fix            # get final output (by name or ID prefix)
-  7. cq resume auth-fix \"now fix the edge case too\"
+  7. cq push auth-fix \"now fix the edge case too\"
 
 BEST PRACTICES FOR ORCHESTRATORS:
-  - Always use --name so you can refer to sessions later
+  - Use cq push <name> — it starts, queues, or resumes as needed
   - Use --cwd to set each sub-agent's working directory
   - For agents editing overlapping files, use git worktrees:
       git worktree add ../my-worktree && cq start \"...\" --cwd ../my-worktree
@@ -47,13 +47,42 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start a new sub-agent: cq start "your prompt here" [--name my-task] [--cwd DIR]
+    /// Start a fresh sub-agent session (always creates new, never queues or resumes).
+    /// Use `cq push` for the smart start/queue/resume behavior.
     Start {
         /// The prompt to send to the sub-agent
         prompt: String,
-        /// Friendly name for this session (used with resume, result, etc.)
+        /// Friendly name for this session
         #[arg(long, short)]
         name: Option<String>,
+        /// Working directory for the sub-agent (default: current dir)
+        #[arg(long, default_value = ".")]
+        cwd: String,
+    },
+    /// Push a message to a session: starts, queues, or resumes as needed.
+    ///
+    /// If no session exists with this name, starts a new one.
+    /// If the session is running, queues the message for delivery when it finishes.
+    /// If the session is completed/failed, resumes it with the message.
+    /// Multiple pushes accumulate — all queued messages are delivered together.
+    Push {
+        /// Session name (required — this is the stable handle for the work stream)
+        name: String,
+        /// Message to send to the agent
+        prompt: String,
+        /// Working directory for the sub-agent (default: current dir)
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        /// Cancel all queued messages for this session
+        #[arg(long)]
+        cancel: bool,
+    },
+    /// Interrupt a running session: kill it, clear the queue, and resume with a new message.
+    Interrupt {
+        /// Session name
+        name: String,
+        /// Message to send after killing
+        prompt: String,
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
@@ -123,19 +152,6 @@ pub enum Commands {
         #[arg(long, short)]
         follow: bool,
     },
-    /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
-    ///
-    /// Takes a session name, cq ID prefix, or raw Claude session ID.
-    Resume {
-        /// Session name, cq ID prefix, or full Claude session ID
-        session_id: String,
-        /// Follow-up prompt to send (default: "continue")
-        #[arg(default_value = "continue")]
-        prompt: String,
-        /// Working directory (default: current dir)
-        #[arg(long, default_value = ".")]
-        cwd: String,
-    },
     /// Block until a session completes: cq wait <name-or-id>
     ///
     /// WARNING: This is blocking! Only use in background tasks or scripts,
@@ -198,6 +214,28 @@ pub enum Commands {
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
+    /// [internal] Spawn claude, wait for it to exit, update DB, and deliver queued messages.
+    /// This is the session wrapper process — it is the direct parent of claude.
+    #[command(hide = true)]
+    RunSession {
+        /// CQ session ID (already registered in DB)
+        session_id: String,
+        /// Claude session ID (for --session-id or --resume)
+        #[arg(long)]
+        claude_session_id: Option<String>,
+        /// Session name (for queue delivery)
+        #[arg(long)]
+        name: Option<String>,
+        /// Working directory
+        #[arg(long)]
+        cwd: String,
+        /// Prompt display string (for DB)
+        #[arg(long)]
+        prompt_display: String,
+        /// Arguments to pass to claude
+        #[arg(last = true)]
+        claude_args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
