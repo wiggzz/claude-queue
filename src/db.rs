@@ -126,11 +126,12 @@ impl Db {
         name: Option<&str>,
         prompt: &str,
         cwd: &str,
-        pid: u32,
+        pid: Option<u32>,
     ) -> rusqlite::Result<()> {
+        let pid_val: Option<i64> = pid.map(|p| p as i64);
         self.conn.execute(
             "INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, claude_session_id, name, prompt, cwd, pid as i64],
+            params![session_id, claude_session_id, name, prompt, cwd, pid_val],
         )?;
         Ok(())
     }
@@ -433,7 +434,7 @@ mod tests {
     #[test]
     fn test_create_and_get_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "do stuff", "/tmp", 1234)
+        db.create_session("s1", None, None, "do stuff", "/tmp", Some(1234))
             .unwrap();
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
@@ -446,9 +447,9 @@ mod tests {
     #[test]
     fn test_find_session_by_name() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", 1)
+        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", Some(1))
             .unwrap();
-        db.create_session("s2", None, Some("beta"), "p2", "/tmp", 2)
+        db.create_session("s2", None, Some("beta"), "p2", "/tmp", Some(2))
             .unwrap();
         let found = db.find_session("alpha").unwrap().unwrap();
         assert_eq!(found.session_id, "s1");
@@ -460,11 +461,11 @@ mod tests {
     #[test]
     fn test_find_sessions_by_name_returns_all() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", 1)
+        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", Some(1))
             .unwrap();
-        db.create_session("s2", None, Some("other"), "p2", "/tmp", 2)
+        db.create_session("s2", None, Some("other"), "p2", "/tmp", Some(2))
             .unwrap();
-        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", 3)
+        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", Some(3))
             .unwrap();
 
         let sessions = db.find_sessions_by_name("mytask").unwrap();
@@ -483,7 +484,7 @@ mod tests {
     #[test]
     fn test_find_session_by_id_prefix() {
         let db = open_temp_db();
-        db.create_session("abc-123-def", None, None, "p", "/tmp", 1)
+        db.create_session("abc-123-def", None, None, "p", "/tmp", Some(1))
             .unwrap();
         let found = db.find_session("abc").unwrap().unwrap();
         assert_eq!(found.session_id, "abc-123-def");
@@ -493,7 +494,8 @@ mod tests {
     #[test]
     fn test_update_session_status() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p", "/tmp", 1).unwrap();
+        db.create_session("s1", None, None, "p", "/tmp", Some(1))
+            .unwrap();
         db.update_session_status("s1", "completed", Some(0))
             .unwrap();
         let sessions = db.get_sessions().unwrap();

@@ -71,13 +71,27 @@ pub fn interrupt(
         .find_session(name)?
         .ok_or_else(|| format!("No session found: {name}"))?;
 
-    // Kill the running session if alive
-    if let Some(pid) = sess.pid
+    // Kill the running session if alive.
+    // The PID may not be set yet if run-session hasn't spawned claude — wait briefly.
+    let mut pid = sess.pid;
+    if pid.is_none() && sess.status == "running" {
+        for _ in 0..10 {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            if let Some(refreshed) = db.find_session(name)?
+                && refreshed.pid.is_some()
+            {
+                pid = refreshed.pid;
+                break;
+            }
+        }
+    }
+    if let Some(pid) = pid
+        && pid > 0
         && is_pid_alive(pid)
     {
         kill_session(pid)?;
         // Wait briefly for process to die
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
     let _ = db.update_session_status(&sess.session_id, "killed", None);
 
@@ -185,7 +199,7 @@ fn launch(
         name,
         prompt_display,
         &cwd_abs.to_string_lossy(),
-        0, // PID will be updated by run-session once claude is spawned
+        None, // PID will be updated by run-session once claude is spawned
     )?;
 
     // Spawn the wrapper process that will be claude's direct parent
@@ -385,13 +399,19 @@ pub fn get_stderr(session_id: &str) -> Result<String, Box<dyn std::error::Error>
 }
 
 pub fn kill_session(pid: i64) -> Result<(), Box<dyn std::error::Error>> {
+    if pid <= 0 {
+        return Err(format!("Invalid PID: {pid}").into());
+    }
     #[cfg(unix)]
     unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
+        // Use SIGINT for graceful shutdown (like Ctrl-C), not SIGTERM
+        libc::kill(pid as i32, libc::SIGINT);
     }
     #[cfg(not(unix))]
     {
-        Command::new("kill").arg(pid.to_string()).status()?;
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()?;
     }
     Ok(())
 }
