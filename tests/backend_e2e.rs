@@ -399,6 +399,158 @@ printf 'claude:%s\n' "$prompt"
     assert_eq!(status, "completed");
 }
 
+#[test]
+fn pi_session_model_from_config_is_passed_to_backend() {
+    let env = TestEnv::new(Some("pi"));
+    fs::write(
+        env.project_dir.path().join(".cq").join("config.json"),
+        r#"{"default_backend":"pi","timeout":5,"poll_interval":0.05,"backends":{"pi":{"model":"openai/gpt-5.4"}},"policies":[],"supervisor":{"enabled":false}}"#,
+    )
+    .unwrap();
+
+    let fake_pi = env.install_script(
+        "pi",
+        r#"#!/bin/sh
+model=""
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session|--extension)
+      shift 2
+      ;;
+    --model)
+      model="$2"
+      shift 2
+      ;;
+    --print|--no-extensions)
+      shift
+      ;;
+    *)
+      prompt="$1"
+      shift
+      ;;
+  esac
+done
+
+if [ "$model" != "openai/gpt-5.4" ]; then
+  echo "expected model openai/gpt-5.4, got '$model'" >&2
+  exit 7
+fi
+
+printf 'pi:%s\n' "$prompt"
+"#,
+    );
+
+    let output = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "hello", "--name", "pi-model"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let wait = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["wait", "pi-model"])
+        .output()
+        .unwrap();
+    assert!(wait.status.success(), "{wait:?}");
+    assert!(String::from_utf8_lossy(&wait.stdout).contains("pi:hello"));
+}
+
+#[test]
+fn pi_supervisor_uses_pi_backend_for_approval() {
+    let env = TestEnv::new(Some("pi"));
+    fs::write(
+        env.project_dir.path().join(".cq").join("config.json"),
+        r#"{"default_backend":"pi","timeout":5,"poll_interval":0.05,"policies":[],"supervisor":{"enabled":true,"backends":{"pi":{"model":"openai/gpt-5.4"}}}}"#,
+    )
+    .unwrap();
+
+    let fake_pi = env.install_script(
+        "pi",
+        r#"#!/bin/sh
+mode="session"
+session_file=""
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session_file="$2"
+      shift 2
+      ;;
+    --extension)
+      shift 2
+      ;;
+    --model)
+      shift 2
+      ;;
+    --print)
+      shift
+      ;;
+    --no-extensions)
+      shift
+      ;;
+    --no-session|--no-tools|--no-skills)
+      mode="supervisor"
+      shift
+      ;;
+    *)
+      prompt="$1"
+      shift
+      ;;
+  esac
+done
+
+if [ "$mode" = "supervisor" ]; then
+  printf '{"decision":"approve","reason":"approved by pi supervisor"}\n'
+  exit 0
+fi
+
+mkdir -p "$(dirname "$session_file")"
+printf '%s\n' "$prompt" >> "$session_file"
+
+if [ "$prompt" = "needs supervisor" ]; then
+  decision=$(printf '{"toolName":"bash","input":{"command":"echo from-pi"}}' | "$CQ_BIN" hook pi)
+  echo "$decision" | grep -q '"decision":"deny"' && exit 1
+fi
+
+printf 'pi:%s\n' "$prompt"
+"#,
+    );
+
+    let output = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "needs supervisor", "--name", "pi-supervised"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    thread::sleep(Duration::from_millis(250));
+
+    let pending = env.command().args(["pending"]).output().unwrap();
+    assert!(pending.status.success(), "{pending:?}");
+    let pending_stdout = String::from_utf8_lossy(&pending.stdout);
+    assert!(
+        !pending_stdout.contains("pi-supervised"),
+        "supervisor should have auto-approved via pi backend: {pending_stdout}"
+    );
+
+    let wait = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["wait", "pi-supervised"])
+        .output()
+        .unwrap();
+    assert!(wait.status.success(), "{wait:?}");
+    assert!(
+        String::from_utf8_lossy(&wait.stdout).contains("pi:needs supervisor"),
+        "{wait:?}"
+    );
+}
+
 fn wait_for_pending(
     env: &TestEnv,
     session_name: &str,

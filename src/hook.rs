@@ -191,6 +191,7 @@ fn evaluate_tool_call(
     if config.supervisor.enabled {
         match supervisor::evaluate(
             &config.supervisor,
+            supervisor_backend_for_session(session_id),
             &tool_call.tool_name,
             &tool_call.tool_input,
         ) {
@@ -260,6 +261,23 @@ fn evaluate_tool_call(
     }
 }
 
+fn supervisor_backend_for_session(_session_id: &str) -> AgentBackend {
+    if let Ok(value) = std::env::var("CQ_AGENT_BACKEND")
+        && let Some(backend) = AgentBackend::parse_env(&value)
+    {
+        return backend;
+    }
+
+    let db_path = config::db_path();
+    if let Ok(db) = Db::open(&db_path)
+        && let Ok(Some(session)) = db.find_session(_session_id)
+    {
+        return session.agent_backend;
+    }
+
+    AgentBackend::Claude
+}
+
 fn managed_session_id(hook_session_id: Option<String>) -> String {
     std::env::var("CQ_SESSION_ID")
         .ok()
@@ -283,7 +301,9 @@ fn print_and_exit(output: HookOutput) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
     use serde_json::json;
+    use std::fs;
 
     #[test]
     fn test_pi_hook_output_allow() {
@@ -301,5 +321,55 @@ mod tests {
             tool_call.tool_input,
             r#"{"content":"hi","file_path":"foo.txt"}"#
         );
+    }
+
+    #[test]
+    fn test_supervisor_backend_uses_session_backend_from_db() {
+        let temp_dir = std::env::temp_dir().join(format!("cq-hook-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("cq.db");
+        let db = Db::open(&db_path).unwrap();
+        db.create_session(
+            "session-pi",
+            AgentBackend::Pi,
+            Some("/tmp/pi-session.jsonl"),
+            Some("pi-test"),
+            "prompt",
+            ".",
+            None,
+        )
+        .unwrap();
+
+        let prev_db = std::env::var("CQ_DB").ok();
+        let prev_backend = std::env::var("CQ_AGENT_BACKEND").ok();
+        unsafe {
+            std::env::set_var("CQ_DB", &db_path);
+            std::env::remove_var("CQ_AGENT_BACKEND");
+        }
+
+        let backend = supervisor_backend_for_session("session-pi");
+
+        if let Some(value) = prev_db {
+            unsafe {
+                std::env::set_var("CQ_DB", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("CQ_DB");
+            }
+        }
+        if let Some(value) = prev_backend {
+            unsafe {
+                std::env::set_var("CQ_AGENT_BACKEND", value);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("CQ_AGENT_BACKEND");
+            }
+        }
+        let _ = fs::remove_dir_all(&temp_dir);
+
+        assert_eq!(backend, AgentBackend::Pi);
     }
 }

@@ -30,49 +30,72 @@ fn is_default_match_mode(mode: &MatchMode) -> bool {
     *mode == MatchMode::Regex
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SupervisorConfig {
     pub enabled: bool,
-    pub model: String,
     pub rules: Vec<String>,
     /// Whether to include the agent's session prompt/task in the supervisor context.
     /// Default: false. When false, the supervisor evaluates tool calls purely on their
     /// own merit, preventing the agent's prompt from biasing approval decisions.
     #[serde(default)]
     pub include_session_context: bool,
+    #[serde(default)]
+    pub backends: BackendConfigs,
 }
 
-impl Default for SupervisorConfig {
-    fn default() -> Self {
-        SupervisorConfig {
-            enabled: false,
-            model: default_supervisor_model(),
-            rules: Vec::new(),
-            include_session_context: false,
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackendConfig {
+    #[serde(default)]
+    pub model: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BackendConfigs {
+    #[serde(default)]
+    pub claude: BackendConfig,
+    #[serde(default)]
+    pub pi: BackendConfig,
+}
+
+impl BackendConfigs {
+    pub fn for_backend(&self, backend: AgentBackend) -> &BackendConfig {
+        match backend {
+            AgentBackend::Claude => &self.claude,
+            AgentBackend::Pi => &self.pi,
         }
     }
-}
-
-fn default_supervisor_model() -> String {
-    "haiku".into()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct RawSupervisorConfig {
     pub enabled: Option<bool>,
-    pub model: Option<String>,
     #[serde(default)]
     pub rules: Vec<String>,
     pub include_session_context: Option<bool>,
+    #[serde(default)]
+    pub backends: RawBackendConfigs,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawBackendConfig {
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawBackendConfigs {
+    #[serde(default)]
+    pub claude: RawBackendConfig,
+    #[serde(default)]
+    pub pi: RawBackendConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub timeout: u64,
     pub poll_interval: f64,
-    /// Model to use for Claude sessions (empty means backend default).
-    pub model: String,
     pub default_backend: AgentBackend,
+    #[serde(default)]
+    pub backends: BackendConfigs,
     pub policies: Vec<Policy>,
     pub supervisor: SupervisorConfig,
 }
@@ -81,8 +104,9 @@ pub struct Config {
 pub(crate) struct RawConfig {
     pub timeout: Option<u64>,
     pub poll_interval: Option<f64>,
-    pub model: Option<String>,
     pub default_backend: Option<AgentBackend>,
+    #[serde(default)]
+    pub backends: RawBackendConfigs,
     #[serde(default)]
     pub policies: Vec<Policy>,
     #[serde(default)]
@@ -94,8 +118,8 @@ impl Default for Config {
         Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
-            model: String::new(),
             default_backend: AgentBackend::default(),
+            backends: BackendConfigs::default(),
             policies: Vec::new(),
             supervisor: SupervisorConfig::default(),
         }
@@ -115,71 +139,11 @@ impl Config {
     /// Project policies come first (higher priority, first-match-wins).
     /// Claude Code permission settings are appended as lowest-priority fallback policies.
     pub fn load(project_dir: &Path) -> Self {
-        let user_config = Self::load_single_raw(&user_config_path());
-        let project_config = Self::load_single_raw(&project_config_path(project_dir));
-
-        let timeout = project_config
-            .timeout
-            .or(user_config.timeout)
-            .unwrap_or_else(default_timeout);
-
-        let poll_interval = project_config
-            .poll_interval
-            .or(user_config.poll_interval)
-            .unwrap_or_else(default_poll_interval);
-
-        let model = project_config
-            .model
-            .clone()
-            .or(user_config.model.clone())
-            .unwrap_or_default();
-
-        // Project policies first (higher priority), then user policies
-        let mut policies = project_config.policies.clone();
-        policies.extend(user_config.policies.clone());
-
-        // Append Claude Code permission-derived policies as lowest-priority fallback.
-        // This makes cq work OOTB without separate config — if Claude Code trusts a tool,
-        // cq will too.
-        let cc_policies = derive_claude_code_policies(project_dir);
-        policies.extend(cc_policies);
-
-        // Supervisor: project config wins for enabled/model, rules are merged (project first)
-        let supervisor = SupervisorConfig {
-            enabled: project_config
-                .supervisor
-                .enabled
-                .or(user_config.supervisor.enabled)
-                .unwrap_or(false),
-            model: project_config
-                .supervisor
-                .model
-                .clone()
-                .or(user_config.supervisor.model.clone())
-                .unwrap_or_else(default_supervisor_model),
-            rules: {
-                let mut rules = project_config.supervisor.rules.clone();
-                rules.extend(user_config.supervisor.rules.clone());
-                rules
-            },
-            include_session_context: project_config
-                .supervisor
-                .include_session_context
-                .or(user_config.supervisor.include_session_context)
-                .unwrap_or(false),
-        };
-
-        Config {
-            timeout,
-            poll_interval,
-            model,
-            default_backend: project_config
-                .default_backend
-                .or(user_config.default_backend)
-                .unwrap_or_default(),
-            policies,
-            supervisor,
-        }
+        Self::load_from_raw_paths(
+            &user_config_path(),
+            &project_config_path(project_dir),
+            project_dir,
+        )
     }
 
     fn load_single(path: &Path) -> Self {
@@ -187,17 +151,14 @@ impl Config {
         Config {
             timeout: raw.timeout.unwrap_or_else(default_timeout),
             poll_interval: raw.poll_interval.unwrap_or_else(default_poll_interval),
-            model: raw.model.unwrap_or_default(),
             default_backend: raw.default_backend.unwrap_or_default(),
+            backends: load_backends(&raw.backends),
             policies: raw.policies,
             supervisor: SupervisorConfig {
                 enabled: raw.supervisor.enabled.unwrap_or(false),
-                model: raw
-                    .supervisor
-                    .model
-                    .unwrap_or_else(default_supervisor_model),
                 rules: raw.supervisor.rules,
                 include_session_context: raw.supervisor.include_session_context.unwrap_or(false),
+                backends: load_backends(&raw.supervisor.backends),
             },
         }
     }
@@ -216,6 +177,99 @@ impl Config {
         }
         let json = serde_json::to_string_pretty(self)?;
         fs::write(path, json)
+    }
+
+    pub fn model_for_backend(&self, backend: AgentBackend) -> &str {
+        &self.backends.for_backend(backend).model
+    }
+
+    fn load_from_raw_paths(user_path: &Path, project_path: &Path, project_dir: &Path) -> Self {
+        let user_config = Self::load_single_raw(user_path);
+        let project_config = Self::load_single_raw(project_path);
+
+        let timeout = project_config
+            .timeout
+            .or(user_config.timeout)
+            .unwrap_or_else(default_timeout);
+
+        let poll_interval = project_config
+            .poll_interval
+            .or(user_config.poll_interval)
+            .unwrap_or_else(default_poll_interval);
+
+        let backends = merge_backends(&project_config.backends, &user_config.backends);
+
+        let mut policies = project_config.policies.clone();
+        policies.extend(user_config.policies.clone());
+
+        let cc_policies = derive_claude_code_policies(project_dir);
+        policies.extend(cc_policies);
+
+        let supervisor = SupervisorConfig {
+            enabled: project_config
+                .supervisor
+                .enabled
+                .or(user_config.supervisor.enabled)
+                .unwrap_or(false),
+            rules: {
+                let mut rules = project_config.supervisor.rules.clone();
+                rules.extend(user_config.supervisor.rules.clone());
+                rules
+            },
+            include_session_context: project_config
+                .supervisor
+                .include_session_context
+                .or(user_config.supervisor.include_session_context)
+                .unwrap_or(false),
+            backends: merge_backends(
+                &project_config.supervisor.backends,
+                &user_config.supervisor.backends,
+            ),
+        };
+
+        Config {
+            timeout,
+            poll_interval,
+            default_backend: project_config
+                .default_backend
+                .or(user_config.default_backend)
+                .unwrap_or_default(),
+            backends,
+            policies,
+            supervisor,
+        }
+    }
+}
+
+fn load_backends(raw: &RawBackendConfigs) -> BackendConfigs {
+    BackendConfigs {
+        claude: BackendConfig {
+            model: raw.claude.model.clone().unwrap_or_default(),
+        },
+        pi: BackendConfig {
+            model: raw.pi.model.clone().unwrap_or_default(),
+        },
+    }
+}
+
+fn merge_backends(project: &RawBackendConfigs, user: &RawBackendConfigs) -> BackendConfigs {
+    BackendConfigs {
+        claude: BackendConfig {
+            model: project
+                .claude
+                .model
+                .clone()
+                .or(user.claude.model.clone())
+                .unwrap_or_default(),
+        },
+        pi: BackendConfig {
+            model: project
+                .pi
+                .model
+                .clone()
+                .or(user.pi.model.clone())
+                .unwrap_or_default(),
+        },
     }
 }
 
@@ -405,8 +459,8 @@ pub fn ensure_user_config() {
         let config = Config {
             timeout: default_timeout(),
             poll_interval: default_poll_interval(),
-            model: String::new(),
             default_backend: AgentBackend::default(),
+            backends: BackendConfigs::default(),
             policies: vec![
                 Policy {
                     tool: "Read".into(),
@@ -447,9 +501,9 @@ pub fn ensure_user_config() {
             ],
             supervisor: SupervisorConfig {
                 enabled: true,
-                model: default_supervisor_model(),
                 rules: Vec::new(),
                 include_session_context: false,
+                backends: BackendConfigs::default(),
             },
         };
         let _ = config.save(&path);
@@ -470,7 +524,10 @@ mod tests {
         assert_eq!(c.default_backend, AgentBackend::Claude);
         assert!(c.policies.is_empty());
         assert!(!c.supervisor.enabled);
-        assert_eq!(c.supervisor.model, "haiku");
+        assert_eq!(c.backends.claude.model, "");
+        assert_eq!(c.backends.pi.model, "");
+        assert_eq!(c.supervisor.backends.claude.model, "");
+        assert_eq!(c.supervisor.backends.pi.model, "");
     }
 
     #[test]
@@ -485,16 +542,19 @@ mod tests {
     #[test]
     fn test_load_valid_config() {
         let mut f = NamedTempFile::new().unwrap();
-        write!(f, r#"{{"timeout": 300, "poll_interval": 2.0, "default_backend": "pi", "policies": [{{"tool": "Bash", "action": "deny"}}], "supervisor": {{"enabled": true, "model": "opus", "rules": ["no secrets"]}}}}"#).unwrap();
+        write!(f, r#"{{"timeout": 300, "poll_interval": 2.0, "default_backend": "pi", "backends": {{"claude": {{"model": "sonnet"}}, "pi": {{"model": "openai/gpt-5.4"}}}}, "policies": [{{"tool": "Bash", "action": "deny"}}], "supervisor": {{"enabled": true, "backends": {{"claude": {{"model": "haiku"}}, "pi": {{"model": "openai/gpt-5.4"}}}}, "rules": ["no secrets"]}}}}"#).unwrap();
         let c = Config::load_single(f.path());
         assert_eq!(c.timeout, 300);
         assert!((c.poll_interval - 2.0).abs() < f64::EPSILON);
         assert_eq!(c.default_backend, AgentBackend::Pi);
+        assert_eq!(c.backends.claude.model, "sonnet");
+        assert_eq!(c.backends.pi.model, "openai/gpt-5.4");
         assert_eq!(c.policies.len(), 1);
         assert_eq!(c.policies[0].tool, "Bash");
         assert_eq!(c.policies[0].action, "deny");
         assert!(c.supervisor.enabled);
-        assert_eq!(c.supervisor.model, "opus");
+        assert_eq!(c.supervisor.backends.claude.model, "haiku");
+        assert_eq!(c.supervisor.backends.pi.model, "openai/gpt-5.4");
         assert_eq!(c.supervisor.rules, vec!["no secrets"]);
     }
 
@@ -514,8 +574,15 @@ mod tests {
         let config = Config {
             timeout: 999,
             poll_interval: 1.5,
-            model: String::new(),
             default_backend: AgentBackend::Pi,
+            backends: BackendConfigs {
+                claude: BackendConfig {
+                    model: "sonnet".into(),
+                },
+                pi: BackendConfig {
+                    model: "openai/gpt-5.4".into(),
+                },
+            },
             policies: vec![Policy {
                 tool: "Write".into(),
                 action: "ask".into(),
@@ -524,9 +591,16 @@ mod tests {
             }],
             supervisor: SupervisorConfig {
                 enabled: true,
-                model: "sonnet".into(),
                 rules: vec!["be safe".into()],
                 include_session_context: false,
+                backends: BackendConfigs {
+                    claude: BackendConfig {
+                        model: "haiku".into(),
+                    },
+                    pi: BackendConfig {
+                        model: "openai/gpt-5.4".into(),
+                    },
+                },
             },
         };
         config.save(&path).unwrap();
@@ -534,10 +608,13 @@ mod tests {
         assert_eq!(loaded.timeout, 999);
         assert!((loaded.poll_interval - 1.5).abs() < f64::EPSILON);
         assert_eq!(loaded.default_backend, AgentBackend::Pi);
+        assert_eq!(loaded.backends.claude.model, "sonnet");
+        assert_eq!(loaded.backends.pi.model, "openai/gpt-5.4");
         assert_eq!(loaded.policies.len(), 1);
         assert_eq!(loaded.policies[0].pattern, Some("secret".into()));
         assert!(loaded.supervisor.enabled);
-        assert_eq!(loaded.supervisor.model, "sonnet");
+        assert_eq!(loaded.supervisor.backends.claude.model, "haiku");
+        assert_eq!(loaded.supervisor.backends.pi.model, "openai/gpt-5.4");
         assert_eq!(loaded.supervisor.rules, vec!["be safe"]);
     }
 
@@ -545,7 +622,8 @@ mod tests {
     fn test_supervisor_default() {
         let s = SupervisorConfig::default();
         assert!(!s.enabled);
-        assert_eq!(s.model, "haiku");
+        assert_eq!(s.backends.claude.model, "");
+        assert_eq!(s.backends.pi.model, "");
         assert!(s.rules.is_empty());
     }
 
@@ -701,7 +779,6 @@ mod tests {
     fn test_load_project_false_overrides_user_true() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set("HOME", home.path().to_str());
 
         fs::create_dir_all(home.path().join(".cq")).unwrap();
         fs::write(
@@ -717,7 +794,11 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = Config::load(project.path());
+        let loaded = Config::load_from_raw_paths(
+            &home.path().join(".cq").join("config.json"),
+            &project.path().join(".cq").join("config.json"),
+            project.path(),
+        );
         assert!(!loaded.supervisor.enabled);
         assert!(!loaded.supervisor.include_session_context);
         assert_eq!(loaded.default_backend, AgentBackend::Claude);
@@ -727,7 +808,6 @@ mod tests {
     fn test_load_project_explicit_default_value_overrides_user_non_default() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let _guard = EnvGuard::set("HOME", home.path().to_str());
 
         fs::create_dir_all(home.path().join(".cq")).unwrap();
         fs::write(
@@ -747,33 +827,42 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = Config::load(project.path());
+        let loaded = Config::load_from_raw_paths(
+            &home.path().join(".cq").join("config.json"),
+            &project.path().join(".cq").join("config.json"),
+            project.path(),
+        );
         assert_eq!(loaded.timeout, default_timeout());
         assert!((loaded.poll_interval - default_poll_interval()).abs() < f64::EPSILON);
     }
 
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
+    #[test]
+    fn test_load_project_backend_model_overrides_user_backend_model() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
 
-    impl EnvGuard {
-        fn set(key: &'static str, value: Option<&str>) -> Self {
-            let previous = std::env::var(key).ok();
-            match value {
-                Some(value) => unsafe { std::env::set_var(key, value) },
-                None => unsafe { std::env::remove_var(key) },
-            }
-            EnvGuard { key, previous }
-        }
-    }
+        fs::create_dir_all(home.path().join(".cq")).unwrap();
+        fs::write(
+            home.path().join(".cq").join("config.json"),
+            r#"{"backends":{"claude":{"model":"sonnet"},"pi":{"model":"openai/gpt-5.4"}},"supervisor":{"backends":{"claude":{"model":"haiku"}}}}"#,
+        )
+        .unwrap();
 
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.previous {
-                Some(value) => unsafe { std::env::set_var(self.key, value) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
+        fs::create_dir_all(project.path().join(".cq")).unwrap();
+        fs::write(
+            project.path().join(".cq").join("config.json"),
+            r#"{"backends":{"claude":{"model":"opus"}},"supervisor":{"backends":{"pi":{"model":"local/qwen"}}}}"#,
+        )
+        .unwrap();
+
+        let loaded = Config::load_from_raw_paths(
+            &home.path().join(".cq").join("config.json"),
+            &project.path().join(".cq").join("config.json"),
+            project.path(),
+        );
+        assert_eq!(loaded.backends.claude.model, "opus");
+        assert_eq!(loaded.backends.pi.model, "openai/gpt-5.4");
+        assert_eq!(loaded.supervisor.backends.claude.model, "haiku");
+        assert_eq!(loaded.supervisor.backends.pi.model, "local/qwen");
     }
 }

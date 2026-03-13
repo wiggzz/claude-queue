@@ -1004,14 +1004,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     } else {
                         "default"
                     };
-                    let model_source = if project_exists && project_cfg.model.is_some() {
-                        "project"
-                    } else if user_cfg.model.is_some() {
-                        "user"
-                    } else {
-                        "default"
-                    };
-
                     println!(
                         "timeout:                    {} ({timeout_source})",
                         merged.timeout
@@ -1019,10 +1011,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     println!(
                         "poll_interval:              {} ({poll_source})",
                         merged.poll_interval
-                    );
-                    println!(
-                        "model:                      {} ({model_source})",
-                        merged.model
                     );
                     let backend_source = if project_exists && project_cfg.default_backend.is_some()
                     {
@@ -1037,19 +1025,38 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         merged.default_backend.as_str()
                     );
 
+                    println!();
+                    println!("Backends:");
+                    let claude_model_source =
+                        if project_exists && project_cfg.backends.claude.model.is_some() {
+                            "project"
+                        } else if user_cfg.backends.claude.model.is_some() {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    println!(
+                        "  claude.model:             {} ({claude_model_source})",
+                        display_model_value(&merged.backends.claude.model)
+                    );
+                    let pi_model_source =
+                        if project_exists && project_cfg.backends.pi.model.is_some() {
+                            "project"
+                        } else if user_cfg.backends.pi.model.is_some() {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    println!(
+                        "  pi.model:                 {} ({pi_model_source})",
+                        display_model_value(&merged.backends.pi.model)
+                    );
+
                     // Supervisor section
                     let sv_enabled_source =
                         if project_exists && project_cfg.supervisor.enabled.is_some() {
                             "project"
                         } else if user_cfg.supervisor.enabled.is_some() {
-                            "user"
-                        } else {
-                            "default"
-                        };
-                    let sv_model_source =
-                        if project_exists && project_cfg.supervisor.model.is_some() {
-                            "project"
-                        } else if user_cfg.supervisor.model.is_some() {
                             "user"
                         } else {
                             "default"
@@ -1070,9 +1077,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "  enabled:                  {} ({sv_enabled_source})",
                         merged.supervisor.enabled
                     );
+                    let sv_claude_model_source = if project_exists
+                        && project_cfg.supervisor.backends.claude.model.is_some()
+                    {
+                        "project"
+                    } else if user_cfg.supervisor.backends.claude.model.is_some() {
+                        "user"
+                    } else {
+                        "default"
+                    };
                     println!(
-                        "  model:                    {} ({sv_model_source})",
-                        merged.supervisor.model
+                        "  claude.model:             {} ({sv_claude_model_source})",
+                        display_model_value(&merged.supervisor.backends.claude.model)
+                    );
+                    let sv_pi_model_source =
+                        if project_exists && project_cfg.supervisor.backends.pi.model.is_some() {
+                            "project"
+                        } else if user_cfg.supervisor.backends.pi.model.is_some() {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    println!(
+                        "  pi.model:                 {} ({sv_pi_model_source})",
+                        display_model_value(&merged.supervisor.backends.pi.model)
                     );
                     println!(
                         "  include_session_context:   {} ({sv_context_source})",
@@ -1308,6 +1336,14 @@ fn print_approved_details(
             "  ✓ [{}] {} — {}",
             session_display, tc.tool_name, description
         );
+    }
+}
+
+fn display_model_value(model: &str) -> &str {
+    if model.is_empty() {
+        "(backend default)"
+    } else {
+        model
     }
 }
 

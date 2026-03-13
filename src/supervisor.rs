@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use crate::config::SupervisorConfig;
 use serde::Deserialize;
 use std::process::Command;
@@ -87,6 +88,7 @@ pub(crate) fn build_prompt(
 
 pub fn evaluate(
     config: &SupervisorConfig,
+    backend: AgentBackend,
     tool_name: &str,
     tool_input: &str,
 ) -> Result<Decision, Box<dyn std::error::Error>> {
@@ -97,20 +99,13 @@ pub fn evaluate(
         config.include_session_context,
     );
 
-    let output = Command::new("claude")
-        .args([
-            "-p",
-            "--output-format",
-            "json",
-            "--model",
-            &config.model,
-            "--max-turns",
-            "1",
-            "--no-session-persistence",
-            &prompt,
-        ])
-        .env_remove("CLAUDECODE")
-        .output();
+    let invocation = build_supervisor_invocation(config, backend, &prompt);
+    let mut command = Command::new(&invocation.program);
+    command.args(&invocation.args);
+    for key in invocation.env_remove {
+        command.env_remove(key);
+    }
+    let output = command.output();
 
     let output = match output {
         Ok(o) => o,
@@ -141,8 +136,10 @@ pub fn evaluate(
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 
-    // The claude CLI with --output-format json wraps the result; extract the text content
-    let response_text = extract_text_from_claude_output(&stdout);
+    let response_text = match backend {
+        AgentBackend::Claude => extract_text_from_claude_output(&stdout),
+        AgentBackend::Pi => strip_markdown_fencing(stdout.trim()),
+    };
 
     let parsed: LlmResponse = match serde_json::from_str(&response_text) {
         Ok(r) => r,
@@ -162,6 +159,59 @@ pub fn evaluate(
             reason: parsed.reason,
             summary: parsed.summary,
         }),
+    }
+}
+
+struct SupervisorInvocation {
+    program: String,
+    args: Vec<String>,
+    env_remove: Vec<&'static str>,
+}
+
+fn build_supervisor_invocation(
+    config: &SupervisorConfig,
+    backend: AgentBackend,
+    prompt: &str,
+) -> SupervisorInvocation {
+    let model = config.backends.for_backend(backend).model.clone();
+    match backend {
+        AgentBackend::Claude => {
+            let mut args = vec![
+                "-p".into(),
+                "--output-format".into(),
+                "json".into(),
+                "--max-turns".into(),
+                "1".into(),
+                "--no-session-persistence".into(),
+                prompt.into(),
+            ];
+            if !model.is_empty() {
+                args.splice(3..3, ["--model".into(), model]);
+            }
+            SupervisorInvocation {
+                program: std::env::var("CQ_CLAUDE_BIN").unwrap_or_else(|_| "claude".into()),
+                args,
+                env_remove: vec!["CLAUDECODE"],
+            }
+        }
+        AgentBackend::Pi => {
+            let mut args = vec![
+                "--print".into(),
+                "--no-session".into(),
+                "--no-tools".into(),
+                "--no-extensions".into(),
+                "--no-skills".into(),
+                prompt.into(),
+            ];
+            if !model.is_empty() {
+                args.splice(5..5, ["--model".into(), model]);
+            }
+            SupervisorInvocation {
+                program: std::env::var("CQ_PI_BIN").unwrap_or_else(|_| "pi".into()),
+                args,
+                env_remove: Vec::new(),
+            }
+        }
     }
 }
 
@@ -314,5 +364,32 @@ mod tests {
     fn test_extract_text_raw_fallback() {
         let input = "not json at all";
         assert_eq!(extract_text_from_claude_output(input), "not json at all");
+    }
+
+    #[test]
+    fn test_build_supervisor_invocation_for_pi_uses_pi_cli() {
+        let config = SupervisorConfig {
+            enabled: true,
+            rules: Vec::new(),
+            include_session_context: false,
+            backends: crate::config::BackendConfigs {
+                claude: crate::config::BackendConfig {
+                    model: String::new(),
+                },
+                pi: crate::config::BackendConfig {
+                    model: "openai/gpt-5.4".into(),
+                },
+            },
+        };
+
+        let invocation = build_supervisor_invocation(&config, AgentBackend::Pi, "prompt");
+
+        assert_eq!(invocation.program, "pi");
+        assert!(invocation.args.contains(&"--print".to_string()));
+        assert!(invocation.args.contains(&"--no-session".to_string()));
+        assert!(invocation.args.contains(&"--no-tools".to_string()));
+        assert!(invocation.args.contains(&"--model".to_string()));
+        assert!(invocation.args.contains(&"openai/gpt-5.4".to_string()));
+        assert!(invocation.args.contains(&"prompt".to_string()));
     }
 }

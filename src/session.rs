@@ -337,8 +337,9 @@ pub fn run_session(
     let run_config = config::Config::load(&project_root);
     let mut invocation =
         build_backend_command(&cq_bin, backend, session_id, agent_session_id, prompt)?;
-    if backend == AgentBackend::Claude && !run_config.model.is_empty() {
-        invocation.args.extend(["--model".into(), run_config.model]);
+    let session_model = run_config.model_for_backend(backend).to_string();
+    if !session_model.is_empty() {
+        invocation.args.extend(["--model".into(), session_model]);
     }
 
     let mut child = if should_use_script_pty(backend) {
