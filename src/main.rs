@@ -1,4 +1,5 @@
 mod audit;
+mod backend;
 mod cli;
 mod config;
 mod db;
@@ -37,29 +38,37 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("cq {}", env!("CARGO_PKG_VERSION"));
         }
 
-        Commands::Hook => {
-            hook::run()?;
+        Commands::Hook { backend } => {
+            hook::run(Some(&backend))?;
         }
 
         Commands::RunSession {
             session_id,
-            claude_session_id: _,
-            name,
+            backend,
+            agent_session_id,
             cwd,
             prompt_display,
-            claude_args,
+            prompt,
+            name,
         } => {
             session::run_session(
                 &session_id,
+                backend,
+                &agent_session_id,
                 name.as_deref(),
                 &cwd,
                 &prompt_display,
-                claude_args,
+                &prompt,
             )?;
         }
 
-        Commands::Start { prompt, name, cwd } => {
-            let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
+        Commands::Start {
+            prompt,
+            name,
+            cwd,
+            backend,
+        } => {
+            let session_id = session::start(&prompt, name.as_deref(), &cwd, backend)?;
             let display = name.as_deref().unwrap_or(&session_id[..8]);
             println!("Started session: {display} ({session_id})");
         }
@@ -97,6 +106,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("Interrupted and resumed session: {name} ({session_id})");
         }
 
+        Commands::Resume {
+            session_id,
+            prompt,
+            cwd,
+            backend,
+        } => {
+            let new_session_id = session::resume(&session_id, &prompt, &cwd, backend)?;
+            println!("Resumed session: {new_session_id}");
+        }
+
         Commands::List { session, status } => {
             let db = open_db()?;
             let mut sessions = db.get_sessions()?;
@@ -112,7 +131,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let rows: Vec<_> = sessions
                 .iter()
                 .map(|s| {
-                    let alive = s.pid.map(session::is_pid_alive).unwrap_or(true);
+                    let alive = s.pid.map(session::is_pid_alive).unwrap_or(false);
                     let resolved_status = if s.status == "running" && !alive {
                         let resolved = session::resolve_dead_session(&db, &s.session_id);
                         if resolved == "completed" {
@@ -536,7 +555,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             // Resolve status of the most recent session
             let status = if last_sess.status == "running" {
-                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(true);
+                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
                 if !alive {
                     session::resolve_dead_session(&db, &last_sess.session_id)
                 } else {
@@ -594,7 +613,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
             // Resolve status of the most recent session
             let status = if last_sess.status == "running" {
-                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(true);
+                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
                 if !alive {
                     session::resolve_dead_session(&db, &last_sess.session_id)
                 } else {
@@ -653,18 +672,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .ok_or_else(|| format!("No session matching '{session_id}'"))?;
             let display = sess.name.as_deref().unwrap_or(&sess.session_id[..8]);
 
-            // Check if already done ("delivering" is transient — keep polling)
+            // Check if already done
             let mut status = sess.status.clone();
             if status == "running" {
-                // pid=None means wrapper hasn't spawned claude yet — don't resolve as dead
-                if let Some(pid) = sess.pid
-                    && !session::is_pid_alive(pid)
-                {
+                let alive = sess.pid.map(session::is_pid_alive).unwrap_or(false);
+                if !alive {
                     status = session::resolve_dead_session(&db, &sess.session_id);
                 }
             }
 
-            if status != "running" && status != "delivering" {
+            if status != "running" {
                 // Already finished — print result and exit
                 print_session_result(&sess.session_id, &status)?;
                 if status != "completed" {
@@ -684,14 +701,14 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     .ok_or("Session disappeared from database")?;
 
                 let mut current_status = current.status.clone();
-                if current_status == "running"
-                    && let Some(pid) = current.pid
-                    && !session::is_pid_alive(pid)
-                {
-                    current_status = session::resolve_dead_session(&db, &current.session_id);
+                if current_status == "running" {
+                    let alive = current.pid.map(session::is_pid_alive).unwrap_or(false);
+                    if !alive {
+                        current_status = session::resolve_dead_session(&db, &current.session_id);
+                    }
                 }
 
-                if current_status != "running" && current_status != "delivering" {
+                if current_status != "running" {
                     print_session_result(&sess.session_id, &current_status)?;
                     if current_status != "completed" {
                         std::process::exit(1);
@@ -870,6 +887,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         return Ok(());
                     }
                     println!("Found {} session(s) matching \"{query}\":\n", results.len());
+                    println!(
+                        "Claude-only discovery: these sessions are read from ~/.claude/projects.\n"
+                    );
                     for s in &results {
                         let prompt = match &s.first_prompt {
                             Some(p) if p.len() > 80 => format!("{}...", &p[..77]),
@@ -963,31 +983,27 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let cwd = std::env::current_dir()?;
             match command {
                 ConfigCommands::Show => {
-                    let defaults = Config::default();
-                    let user_cfg = config::load_file(&config::user_config_path());
+                    let user_cfg = config::load_file_raw(&config::user_config_path());
                     let project_path = config::project_config_path(&cwd);
-                    let project_cfg = config::load_file(&project_path);
+                    let project_cfg = config::load_file_raw(&project_path);
                     let merged = Config::load(&cwd);
                     let project_exists = project_path.exists();
 
                     // Determine source for scalar settings
-                    let timeout_source =
-                        if project_exists && project_cfg.timeout != defaults.timeout {
-                            "project"
-                        } else if user_cfg.timeout != defaults.timeout {
-                            "user"
-                        } else {
-                            "default"
-                        };
-                    let poll_source =
-                        if project_exists && project_cfg.poll_interval != defaults.poll_interval {
-                            "project"
-                        } else if user_cfg.poll_interval != defaults.poll_interval {
-                            "user"
-                        } else {
-                            "default"
-                        };
-
+                    let timeout_source = if project_exists && project_cfg.timeout.is_some() {
+                        "project"
+                    } else if user_cfg.timeout.is_some() {
+                        "user"
+                    } else {
+                        "default"
+                    };
+                    let poll_source = if project_exists && project_cfg.poll_interval.is_some() {
+                        "project"
+                    } else if user_cfg.poll_interval.is_some() {
+                        "user"
+                    } else {
+                        "default"
+                    };
                     println!(
                         "timeout:                    {} ({timeout_source})",
                         merged.timeout
@@ -996,33 +1012,64 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "poll_interval:              {} ({poll_source})",
                         merged.poll_interval
                     );
-
-                    // Supervisor section
-                    let sv_enabled_source = if project_exists && project_cfg.supervisor.enabled {
-                        "project"
-                    } else if user_cfg.supervisor.enabled {
-                        "user"
-                    } else {
-                        "default"
-                    };
-                    let sv_model_source = if project_exists
-                        && !project_cfg.supervisor.model.is_empty()
-                        && project_cfg.supervisor.model != defaults.supervisor.model
+                    let backend_source = if project_exists && project_cfg.default_backend.is_some()
                     {
                         "project"
-                    } else if user_cfg.supervisor.model != defaults.supervisor.model {
+                    } else if user_cfg.default_backend.is_some() {
                         "user"
                     } else {
                         "default"
                     };
-                    let sv_context_source =
-                        if project_exists && project_cfg.supervisor.include_session_context {
+                    println!(
+                        "default_backend:            {} ({backend_source})",
+                        merged.default_backend.as_str()
+                    );
+
+                    println!();
+                    println!("Backends:");
+                    let claude_model_source =
+                        if project_exists && project_cfg.backends.claude.model.is_some() {
                             "project"
-                        } else if user_cfg.supervisor.include_session_context {
+                        } else if user_cfg.backends.claude.model.is_some() {
                             "user"
                         } else {
                             "default"
                         };
+                    println!(
+                        "  claude.model:             {} ({claude_model_source})",
+                        display_model_value(&merged.backends.claude.model)
+                    );
+                    let pi_model_source =
+                        if project_exists && project_cfg.backends.pi.model.is_some() {
+                            "project"
+                        } else if user_cfg.backends.pi.model.is_some() {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    println!(
+                        "  pi.model:                 {} ({pi_model_source})",
+                        display_model_value(&merged.backends.pi.model)
+                    );
+
+                    // Supervisor section
+                    let sv_enabled_source =
+                        if project_exists && project_cfg.supervisor.enabled.is_some() {
+                            "project"
+                        } else if user_cfg.supervisor.enabled.is_some() {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    let sv_context_source = if project_exists
+                        && project_cfg.supervisor.include_session_context.is_some()
+                    {
+                        "project"
+                    } else if user_cfg.supervisor.include_session_context.is_some() {
+                        "user"
+                    } else {
+                        "default"
+                    };
 
                     println!();
                     println!("Supervisor:");
@@ -1030,9 +1077,30 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "  enabled:                  {} ({sv_enabled_source})",
                         merged.supervisor.enabled
                     );
+                    let sv_claude_model_source = if project_exists
+                        && project_cfg.supervisor.backends.claude.model.is_some()
+                    {
+                        "project"
+                    } else if user_cfg.supervisor.backends.claude.model.is_some() {
+                        "user"
+                    } else {
+                        "default"
+                    };
                     println!(
-                        "  model:                    {} ({sv_model_source})",
-                        merged.supervisor.model
+                        "  claude.model:             {} ({sv_claude_model_source})",
+                        display_model_value(&merged.supervisor.backends.claude.model)
+                    );
+                    let sv_pi_model_source =
+                        if project_exists && project_cfg.supervisor.backends.pi.model.is_some() {
+                            "project"
+                        } else if user_cfg.supervisor.backends.pi.model.is_some() {
+                            "user"
+                        } else {
+                            "default"
+                        };
+                    println!(
+                        "  pi.model:                 {} ({sv_pi_model_source})",
+                        display_model_value(&merged.supervisor.backends.pi.model)
                     );
                     println!(
                         "  include_session_context:   {} ({sv_context_source})",
@@ -1268,6 +1336,14 @@ fn print_approved_details(
             "  ✓ [{}] {} — {}",
             session_display, tc.tool_name, description
         );
+    }
+}
+
+fn display_model_value(model: &str) -> &str {
+    if model.is_empty() {
+        "(backend default)"
+    } else {
+        model
     }
 }
 

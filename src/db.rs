@@ -1,3 +1,4 @@
+use crate::backend::AgentBackend;
 use rusqlite::{Connection, params};
 use std::path::Path;
 
@@ -9,6 +10,8 @@ pub struct Db {
 pub struct Session {
     pub _id: i64,
     pub session_id: String,
+    pub agent_backend: AgentBackend,
+    pub agent_session_id: Option<String>,
     pub claude_session_id: Option<String>,
     pub name: Option<String>,
     pub prompt: String,
@@ -33,21 +36,24 @@ pub struct ToolCall {
     pub resolved_at: Option<String>,
 }
 
-const SESSION_COLS: &str = "id, session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
+const SESSION_COLS: &str = "id, session_id, agent_backend, agent_session_id, claude_session_id, name, prompt, cwd, status, pid, started_at, completed_at, exit_code";
+const CURRENT_SCHEMA_VERSION: i32 = 3;
 
 fn map_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
         _id: row.get(0)?,
         session_id: row.get(1)?,
-        claude_session_id: row.get(2)?,
-        name: row.get(3)?,
-        prompt: row.get(4)?,
-        _cwd: row.get(5)?,
-        status: row.get(6)?,
-        pid: row.get(7)?,
-        started_at: row.get(8)?,
-        _completed_at: row.get(9)?,
-        _exit_code: row.get(10)?,
+        agent_backend: AgentBackend::from_db(&row.get::<_, String>(2)?),
+        agent_session_id: row.get(3)?,
+        claude_session_id: row.get(4)?,
+        name: row.get(5)?,
+        prompt: row.get(6)?,
+        _cwd: row.get(7)?,
+        status: row.get(8)?,
+        pid: row.get(9)?,
+        started_at: row.get(10)?,
+        _completed_at: row.get(11)?,
+        _exit_code: row.get(12)?,
     })
 }
 
@@ -63,44 +69,7 @@ impl Db {
             PRAGMA busy_timeout=5000;
         ",
         )?;
-        conn.execute_batch(
-            "
-            CREATE TABLE IF NOT EXISTS sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT UNIQUE NOT NULL,
-                claude_session_id TEXT,
-                name TEXT,
-                prompt TEXT NOT NULL,
-                cwd TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'running',
-                pid INTEGER,
-                started_at TEXT NOT NULL DEFAULT (datetime('now')),
-                completed_at TEXT,
-                exit_code INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS tool_calls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                tool_name TEXT NOT NULL,
-                tool_input TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'pending',
-                reason TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                resolved_at TEXT
-            );
-            CREATE INDEX IF NOT EXISTS idx_tool_calls_pending
-                ON tool_calls(status) WHERE status = 'pending';
-            CREATE INDEX IF NOT EXISTS idx_tool_calls_session
-                ON tool_calls(session_id);
-            CREATE INDEX IF NOT EXISTS idx_sessions_status
-                ON sessions(status);
-        ",
-        )?;
-        // Migrations for existing DBs
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
-        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
-        let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
-        // Queue table for push queuing (multiple messages per session)
+        Self::migrate(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS queued_messages (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,9 +79,6 @@ impl Db {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             );",
         )?;
-        // Migration: drop UNIQUE constraint if upgrading from old schema
-        // SQLite doesn't support DROP CONSTRAINT, but the table recreate handles it
-        // since we use CREATE TABLE IF NOT EXISTS with the new schema.
         Ok(Db { conn })
     }
 
@@ -122,36 +88,41 @@ impl Db {
     pub fn create_session(
         &self,
         session_id: &str,
-        claude_session_id: Option<&str>,
+        agent_backend: AgentBackend,
+        agent_session_id: Option<&str>,
         name: Option<&str>,
         prompt: &str,
         cwd: &str,
         pid: Option<u32>,
     ) -> rusqlite::Result<()> {
-        let pid_val: Option<i64> = pid.map(|p| p as i64);
+        let pid_val = pid.map(|value| value as i64);
         self.conn.execute(
-            "INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![session_id, claude_session_id, name, prompt, cwd, pid_val],
+            "INSERT INTO sessions (session_id, agent_backend, agent_session_id, claude_session_id, name, prompt, cwd, pid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                session_id,
+                agent_backend.as_str(),
+                agent_session_id,
+                if agent_backend == AgentBackend::Claude {
+                    agent_session_id
+                } else {
+                    None
+                },
+                name,
+                prompt,
+                cwd,
+                pid_val
+            ],
         )?;
         Ok(())
     }
 
     /// Atomically claim a session for queued message delivery by transitioning its status.
-    /// Returns true if this caller won the race (status was updated), false if someone else got there first.
     pub fn claim_session_for_delivery(&self, session_id: &str) -> rusqlite::Result<bool> {
         let changed = self.conn.execute(
             "UPDATE sessions SET status = 'delivering' WHERE session_id = ?1 AND status IN ('completed', 'failed')",
             params![session_id],
         )?;
         Ok(changed > 0)
-    }
-
-    pub fn update_session_pid(&self, session_id: &str, pid: u32) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE sessions SET pid = ?1 WHERE session_id = ?2",
-            params![pid, session_id],
-        )?;
-        Ok(())
     }
 
     pub fn update_session_status(
@@ -167,6 +138,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_session_pid(&self, session_id: &str, pid: u32) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET pid = ?1 WHERE session_id = ?2",
+            params![pid as i64, session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_sessions(&self) -> rusqlite::Result<Vec<Session>> {
         let sql = format!("SELECT {SESSION_COLS} FROM sessions ORDER BY id DESC");
         let mut stmt = self.conn.prepare(&sql)?;
@@ -174,11 +153,11 @@ impl Db {
         rows.collect()
     }
 
-    /// Find a session by name, session_id prefix, or claude_session_id prefix.
+    /// Find a session by name, session_id prefix, or backend session ID prefix.
     /// Name is an exact match; IDs are prefix matches. Most recent match wins.
     pub fn find_session(&self, query: &str) -> rusqlite::Result<Option<Session>> {
         let sql = format!(
-            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 OR session_id LIKE ?1 || '%' OR claude_session_id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1"
+            "SELECT {SESSION_COLS} FROM sessions WHERE name = ?1 OR session_id LIKE ?1 || '%' OR agent_session_id LIKE ?1 || '%' OR claude_session_id LIKE ?1 || '%' ORDER BY id DESC LIMIT 1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let mut rows = stmt.query_map(params![query], map_session)?;
@@ -212,6 +191,212 @@ impl Db {
             map.insert(id, name);
         }
         Ok(map)
+    }
+
+    fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+        let mut version = Self::schema_version(conn)?;
+        if version == 0 {
+            version = Self::infer_legacy_version(conn)?;
+            if version > 0 {
+                Self::set_schema_version(conn, version)?;
+            }
+        }
+
+        while version < CURRENT_SCHEMA_VERSION {
+            let next = version + 1;
+            Self::apply_migration(conn, next)?;
+            Self::set_schema_version(conn, next)?;
+            version = next;
+        }
+
+        Ok(())
+    }
+
+    fn infer_legacy_version(conn: &Connection) -> rusqlite::Result<i32> {
+        let has_sessions = Self::table_exists(conn, "sessions")?;
+        let has_tool_calls = Self::table_exists(conn, "tool_calls")?;
+        if !has_sessions && !has_tool_calls {
+            return Ok(0);
+        }
+
+        if Self::column_exists(conn, "sessions", "agent_backend")?
+            && Self::column_exists(conn, "sessions", "agent_session_id")?
+        {
+            return Ok(3);
+        }
+
+        if Self::column_exists(conn, "sessions", "claude_session_id")?
+            || Self::column_exists(conn, "sessions", "name")?
+            || Self::column_exists(conn, "tool_calls", "summary")?
+        {
+            return Ok(2);
+        }
+
+        Ok(1)
+    }
+
+    fn apply_migration(conn: &Connection, version: i32) -> rusqlite::Result<()> {
+        match version {
+            1 => Self::migration_1_initial_schema(conn),
+            2 => Self::migration_2_session_metadata(conn),
+            3 => Self::migration_3_agent_backends(conn),
+            _ => Ok(()),
+        }
+    }
+
+    fn migration_1_initial_schema(conn: &Connection) -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                pid INTEGER,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                exit_code INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_input TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_tool_calls_pending
+                ON tool_calls(status) WHERE status = 'pending';
+            CREATE INDEX IF NOT EXISTS idx_tool_calls_session
+                ON tool_calls(session_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_status
+                ON sessions(status);
+            CREATE TABLE IF NOT EXISTS queued_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_name TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                cwd TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+        ",
+        )
+    }
+
+    fn migration_2_session_metadata(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN claude_session_id TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN name TEXT", []);
+        let _ = conn.execute("ALTER TABLE tool_calls ADD COLUMN summary TEXT", []);
+        Ok(())
+    }
+
+    fn migration_3_agent_backends(conn: &Connection) -> rusqlite::Result<()> {
+        let _ = conn.execute(
+            "ALTER TABLE sessions ADD COLUMN agent_backend TEXT NOT NULL DEFAULT 'claude'",
+            [],
+        );
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN agent_session_id TEXT", []);
+
+        if Self::column_exists(conn, "sessions", "claude_session_id")? {
+            conn.execute_batch(
+                "
+                BEGIN IMMEDIATE;
+                CREATE TABLE sessions_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,
+                    agent_backend TEXT NOT NULL DEFAULT 'claude',
+                    agent_session_id TEXT,
+                    claude_session_id TEXT,
+                    name TEXT,
+                    prompt TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    pid INTEGER,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    completed_at TEXT,
+                    exit_code INTEGER
+                );
+                INSERT INTO sessions_new (
+                    id,
+                    session_id,
+                    agent_backend,
+                    agent_session_id,
+                    claude_session_id,
+                    name,
+                    prompt,
+                    cwd,
+                    status,
+                    pid,
+                    started_at,
+                    completed_at,
+                    exit_code
+                )
+                SELECT
+                    id,
+                    session_id,
+                    COALESCE(agent_backend, 'claude'),
+                    CASE
+                        WHEN agent_session_id IS NOT NULL THEN agent_session_id
+                        WHEN COALESCE(agent_backend, 'claude') = 'claude' THEN COALESCE(claude_session_id, session_id)
+                        ELSE claude_session_id
+                    END,
+                    claude_session_id,
+                    name,
+                    prompt,
+                    cwd,
+                    status,
+                    pid,
+                    started_at,
+                    completed_at,
+                    exit_code
+                FROM sessions;
+                DROP TABLE sessions;
+                ALTER TABLE sessions_new RENAME TO sessions;
+                CREATE INDEX IF NOT EXISTS idx_sessions_status
+                    ON sessions(status);
+                COMMIT;
+            ",
+            )?;
+        }
+
+        conn.execute(
+            "UPDATE sessions
+             SET agent_session_id = COALESCE(agent_session_id, claude_session_id, session_id)
+             WHERE agent_backend = 'claude'",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn schema_version(conn: &Connection) -> rusqlite::Result<i32> {
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+    }
+
+    fn set_schema_version(conn: &Connection, version: i32) -> rusqlite::Result<()> {
+        conn.execute_batch(&format!("PRAGMA user_version = {version}"))
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> rusqlite::Result<bool> {
+        let mut stmt =
+            conn.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1")?;
+        let mut rows = stmt.query(params![table])?;
+        Ok(rows.next()?.is_some())
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut stmt = conn.prepare(&pragma)?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+
+        for name in rows {
+            if name? == column {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
     }
 
     // --- Tool Calls ---
@@ -347,7 +532,6 @@ impl Db {
 
     // --- Queued Messages ---
 
-    /// Push a message onto the queue for a session name.
     pub fn push_queued_message(
         &self,
         session_name: &str,
@@ -361,8 +545,6 @@ impl Db {
         Ok(())
     }
 
-    /// Take all queued messages for a session name (ordered by id ASC), deleting them.
-    /// Returns vec of (prompt, cwd) tuples.
     pub fn take_all_queued_messages(
         &self,
         session_name: &str,
@@ -387,7 +569,6 @@ impl Db {
         Ok(rows)
     }
 
-    /// Clear all queued messages for a session name. Returns count deleted.
     pub fn clear_queued_messages(&self, session_name: &str) -> rusqlite::Result<usize> {
         let changed = self.conn.execute(
             "DELETE FROM queued_messages WHERE session_name = ?1",
@@ -396,7 +577,6 @@ impl Db {
         Ok(changed)
     }
 
-    /// Check if any queued messages exist for a session name.
     #[allow(dead_code)]
     pub fn has_queued_messages(&self, session_name: &str) -> rusqlite::Result<bool> {
         let mut stmt = self
@@ -482,14 +662,35 @@ mod tests {
         Db::open(tmp.path()).unwrap()
     }
 
+    fn create_claude_session(
+        db: &Db,
+        session_id: &str,
+        name: Option<&str>,
+        prompt: &str,
+        cwd: &str,
+        pid: u32,
+    ) {
+        db.create_session(
+            session_id,
+            AgentBackend::Claude,
+            Some(session_id),
+            name,
+            prompt,
+            cwd,
+            Some(pid),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_create_and_get_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "do stuff", "/tmp", Some(1234))
-            .unwrap();
+        create_claude_session(&db, "s1", None, "do stuff", "/tmp", 1234);
         let sessions = db.get_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].session_id, "s1");
+        assert_eq!(sessions[0].agent_backend, AgentBackend::Claude);
+        assert_eq!(sessions[0].agent_session_id.as_deref(), Some("s1"));
         assert_eq!(sessions[0].prompt, "do stuff");
         assert_eq!(sessions[0]._cwd, "/tmp");
         assert_eq!(sessions[0].status, "running");
@@ -498,10 +699,8 @@ mod tests {
     #[test]
     fn test_find_session_by_name() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("alpha"), "p1", "/tmp", Some(1))
-            .unwrap();
-        db.create_session("s2", None, Some("beta"), "p2", "/tmp", Some(2))
-            .unwrap();
+        create_claude_session(&db, "s1", Some("alpha"), "p1", "/tmp", 1);
+        create_claude_session(&db, "s2", Some("beta"), "p2", "/tmp", 2);
         let found = db.find_session("alpha").unwrap().unwrap();
         assert_eq!(found.session_id, "s1");
         let found = db.find_session("beta").unwrap().unwrap();
@@ -512,12 +711,9 @@ mod tests {
     #[test]
     fn test_find_sessions_by_name_returns_all() {
         let db = open_temp_db();
-        db.create_session("s1", None, Some("mytask"), "p1", "/tmp", Some(1))
-            .unwrap();
-        db.create_session("s2", None, Some("other"), "p2", "/tmp", Some(2))
-            .unwrap();
-        db.create_session("s3", None, Some("mytask"), "p3", "/tmp", Some(3))
-            .unwrap();
+        create_claude_session(&db, "s1", Some("mytask"), "p1", "/tmp", 1);
+        create_claude_session(&db, "s2", Some("other"), "p2", "/tmp", 2);
+        create_claude_session(&db, "s3", Some("mytask"), "p3", "/tmp", 3);
 
         let sessions = db.find_sessions_by_name("mytask").unwrap();
         assert_eq!(sessions.len(), 2);
@@ -535,18 +731,35 @@ mod tests {
     #[test]
     fn test_find_session_by_id_prefix() {
         let db = open_temp_db();
-        db.create_session("abc-123-def", None, None, "p", "/tmp", Some(1))
-            .unwrap();
+        create_claude_session(&db, "abc-123-def", None, "p", "/tmp", 1);
         let found = db.find_session("abc").unwrap().unwrap();
         assert_eq!(found.session_id, "abc-123-def");
         assert!(db.find_session("xyz").unwrap().is_none());
     }
 
     #[test]
+    fn test_find_session_by_agent_session_id_prefix() {
+        let db = open_temp_db();
+        db.create_session(
+            "s1",
+            AgentBackend::Pi,
+            Some("/tmp/pi-session-123.jsonl"),
+            Some("pi-task"),
+            "p",
+            "/tmp",
+            Some(1),
+        )
+        .unwrap();
+
+        let found = db.find_session("/tmp/pi-session").unwrap().unwrap();
+        assert_eq!(found.session_id, "s1");
+        assert_eq!(found.agent_backend, AgentBackend::Pi);
+    }
+
+    #[test]
     fn test_update_session_status() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p", "/tmp", Some(1))
-            .unwrap();
+        create_claude_session(&db, "s1", None, "p", "/tmp", 1);
         db.update_session_status("s1", "completed", Some(0))
             .unwrap();
         let sessions = db.get_sessions().unwrap();
@@ -735,14 +948,11 @@ mod tests {
     #[test]
     fn test_get_running_sessions() {
         let db = open_temp_db();
-        db.create_session("s1", None, None, "p1", "/tmp", Some(1))
-            .unwrap();
-        db.create_session("s2", None, None, "p2", "/tmp", Some(2))
-            .unwrap();
+        create_claude_session(&db, "s1", None, "p1", "/tmp", 1);
+        create_claude_session(&db, "s2", None, "p2", "/tmp", 2);
         db.update_session_status("s2", "completed", Some(0))
             .unwrap();
-        db.create_session("s3", None, None, "p3", "/tmp", Some(3))
-            .unwrap();
+        create_claude_session(&db, "s3", None, "p3", "/tmp", 3);
         let running = db.get_running_sessions().unwrap();
         assert_eq!(running.len(), 2);
         let ids: Vec<&str> = running.iter().map(|s| s.session_id.as_str()).collect();
@@ -828,61 +1038,52 @@ mod tests {
     }
 
     #[test]
-    fn test_push_and_take_queued_messages() {
-        let db = open_temp_db();
-        db.push_queued_message("mytask", "do thing 1", Some("/tmp"))
-            .unwrap();
-        db.push_queued_message("mytask", "do thing 2", Some("/home"))
-            .unwrap();
-        assert!(db.has_queued_messages("mytask").unwrap());
+    fn test_open_migrates_legacy_claude_schema() {
+        let tmp = NamedTempFile::new().unwrap();
+        let conn = Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            "
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE NOT NULL,
+                claude_session_id TEXT,
+                name TEXT,
+                prompt TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                pid INTEGER,
+                started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT,
+                exit_code INTEGER
+            );
+            CREATE TABLE tool_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                tool_input TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                reason TEXT,
+                summary TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at TEXT
+            );
+            INSERT INTO sessions (session_id, claude_session_id, name, prompt, cwd, status, pid)
+            VALUES ('legacy', 'claude-legacy', 'name', 'prompt', '/tmp', 'running', 7);
+        ",
+        )
+        .unwrap();
+        drop(conn);
 
-        let msgs = db.take_all_queued_messages("mytask").unwrap();
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].0, "do thing 1");
-        assert_eq!(msgs[0].1.as_deref(), Some("/tmp"));
-        assert_eq!(msgs[1].0, "do thing 2");
-        assert_eq!(msgs[1].1.as_deref(), Some("/home"));
-
-        // take deletes them
-        assert!(!db.has_queued_messages("mytask").unwrap());
-        assert!(db.take_all_queued_messages("mytask").unwrap().is_empty());
-    }
-
-    #[test]
-    fn test_push_queued_message_no_cwd() {
-        let db = open_temp_db();
-        db.push_queued_message("mytask", "do thing", None).unwrap();
-        let msgs = db.take_all_queued_messages("mytask").unwrap();
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].0, "do thing");
-        assert!(msgs[0].1.is_none());
-    }
-
-    #[test]
-    fn test_clear_queued_messages() {
-        let db = open_temp_db();
-        db.push_queued_message("mytask", "msg 1", Some("/tmp"))
-            .unwrap();
-        db.push_queued_message("mytask", "msg 2", None).unwrap();
-        assert_eq!(db.clear_queued_messages("mytask").unwrap(), 2);
-        assert!(!db.has_queued_messages("mytask").unwrap());
-        // Clear non-existent returns 0
-        assert_eq!(db.clear_queued_messages("mytask").unwrap(), 0);
-    }
-
-    #[test]
-    fn test_queued_messages_independent_per_name() {
-        let db = open_temp_db();
-        db.push_queued_message("task-a", "prompt a", Some("/a"))
-            .unwrap();
-        db.push_queued_message("task-b", "prompt b", Some("/b"))
-            .unwrap();
-        assert!(db.has_queued_messages("task-a").unwrap());
-        assert!(db.has_queued_messages("task-b").unwrap());
-        assert!(!db.has_queued_messages("task-c").unwrap());
-
-        db.clear_queued_messages("task-a").unwrap();
-        assert!(!db.has_queued_messages("task-a").unwrap());
-        assert!(db.has_queued_messages("task-b").unwrap());
+        let db = Db::open(tmp.path()).unwrap();
+        let session = db.find_session("legacy").unwrap().unwrap();
+        assert_eq!(session.agent_backend, AgentBackend::Claude);
+        assert_eq!(session.agent_session_id.as_deref(), Some("claude-legacy"));
+        assert_eq!(session.claude_session_id.as_deref(), Some("claude-legacy"));
+        assert_eq!(
+            db.conn
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i32>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
     }
 }

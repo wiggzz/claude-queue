@@ -67,7 +67,7 @@ fn extract_match_text(tool_name: &str, tool_input: &str) -> Option<String> {
     match tool_name {
         "Bash" => extract_json_field(tool_input, "command"),
         "Read" | "Edit" | "Write" => extract_json_field(tool_input, "file_path"),
-        "Glob" | "Grep" => extract_json_field(tool_input, "path"),
+        "Glob" | "Grep" | "LS" => extract_json_field(tool_input, "path"),
         "WebFetch" => extract_json_field(tool_input, "url"),
         _ => None,
     }
@@ -326,5 +326,12 @@ mod tests {
 
         let input2 = r#"{"pattern": "TODO", "path": "/etc"}"#;
         assert_eq!(check("Grep", input2, &policies), None);
+    }
+
+    #[test]
+    fn test_ls_matches_path() {
+        let policies = vec![policy("LS", "allow", Some(r"^src"))];
+        let input = r#"{"path": "src"}"#;
+        assert_eq!(check("LS", input, &policies), Some("allow".into()));
     }
 }

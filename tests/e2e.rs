@@ -4,7 +4,7 @@
 //! They are ignored by default — run with:
 //!   cargo test --test e2e -- --ignored --test-threads=1 --nocapture
 //!
-//! Set CQ_E2E_MODEL to override the model (default: haiku).
+//! Set CQ_E2E_MODEL to override the Claude session model (default: haiku).
 
 use std::env;
 use std::fs;
@@ -37,7 +37,7 @@ impl TestEnv {
         let model = env::var("CQ_E2E_MODEL").unwrap_or_else(|_| "haiku".into());
         fs::write(
             project_dir.join(".cq/config.json"),
-            format!(r#"{{"model": "{}"}}"#, model),
+            format!(r#"{{"backends": {{"claude": {{"model": "{}"}}}}}}"#, model),
         )
         .unwrap();
 

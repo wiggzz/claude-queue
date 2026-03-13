@@ -1,12 +1,13 @@
+use crate::backend::AgentBackend;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
     name = "cq",
     version,
-    about = "Claude Queue — orchestrate multiple Claude Code sub-agent sessions",
+    about = "Claude Queue — orchestrate coding-agent sub-agent sessions",
     long_about = "\
-Orchestrate parallel Claude Code sub-agents with tool-call permission gating.
+Orchestrate parallel coding-agent sub-agents with tool-call permission gating.
 
 QUICK START:
   1. cq push auth-fix \"fix the auth bug\" --cwd ~/myproject
@@ -52,12 +53,15 @@ pub enum Commands {
     Start {
         /// The prompt to send to the sub-agent
         prompt: String,
-        /// Friendly name for this session
+        /// Friendly name for this session (used with resume, result, etc.)
         #[arg(long, short)]
         name: Option<String>,
         /// Working directory for the sub-agent (default: current dir)
         #[arg(long, default_value = ".")]
         cwd: String,
+        /// Backend to use (default: --backend, CQ_AGENT_BACKEND, config default_backend, then claude)
+        #[arg(long, value_enum)]
+        backend: Option<AgentBackend>,
     },
     /// Push a message to a session: starts, queues, or resumes as needed.
     ///
@@ -152,6 +156,22 @@ pub enum Commands {
         #[arg(long, short)]
         follow: bool,
     },
+    /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
+    ///
+    /// Takes a session name, cq ID prefix, or raw backend session ID.
+    Resume {
+        /// Session name, cq ID prefix, or full backend session ID
+        session_id: String,
+        /// Follow-up prompt to send (default: "continue")
+        #[arg(default_value = "continue")]
+        prompt: String,
+        /// Working directory (default: current dir)
+        #[arg(long, default_value = ".")]
+        cwd: String,
+        /// Backend to use for raw external session IDs
+        #[arg(long, value_enum)]
+        backend: Option<AgentBackend>,
+    },
     /// Block until a session completes: cq wait <name-or-id>
     ///
     /// WARNING: This is blocking! Only use in background tasks or scripts,
@@ -168,7 +188,7 @@ pub enum Commands {
     },
     /// Live dashboard: sessions + pending approvals, refreshes every 2s
     Watch,
-    /// Discover and search non-cq-managed Claude Code sessions
+    /// Discover and search non-cq-managed Claude Code sessions (Claude-only)
     Sessions {
         #[command(subcommand)]
         command: SessionsCommands,
@@ -211,30 +231,28 @@ pub enum Commands {
         #[command(subcommand)]
         command: ConfigCommands,
     },
-    /// [internal] Hook entry point called by Claude Code's PreToolUse system
+    /// [internal] Hook entry point called by backend-specific tool interception
     #[command(hide = true)]
-    Hook,
-    /// [internal] Spawn claude, wait for it to exit, update DB, and deliver queued messages.
-    /// This is the session wrapper process — it is the direct parent of claude.
+    Hook {
+        #[arg(default_value = "claude")]
+        backend: String,
+    },
+    /// [internal] Background session runner
     #[command(hide = true)]
     RunSession {
-        /// CQ session ID (already registered in DB)
         session_id: String,
-        /// Claude session ID (for --session-id or --resume)
+        #[arg(long, value_enum)]
+        backend: AgentBackend,
         #[arg(long)]
-        claude_session_id: Option<String>,
-        /// Session name (for queue delivery)
-        #[arg(long)]
-        name: Option<String>,
-        /// Working directory
+        agent_session_id: String,
         #[arg(long)]
         cwd: String,
-        /// Prompt display string (for DB)
         #[arg(long)]
         prompt_display: String,
-        /// Arguments to pass to claude
-        #[arg(last = true)]
-        claude_args: Vec<String>,
+        #[arg(long)]
+        prompt: String,
+        #[arg(long)]
+        name: Option<String>,
     },
 }
 
@@ -249,7 +267,7 @@ pub enum PendingCommands {
 
 #[derive(Subcommand)]
 pub enum SessionsCommands {
-    /// List recent Claude Code sessions (not managed by cq)
+    /// List recent Claude Code sessions (not managed by cq, Claude-only)
     List {
         /// Maximum number of sessions to show
         #[arg(long, short, default_value = "20")]
@@ -298,4 +316,22 @@ pub enum PolicyCommands {
 pub enum ConfigCommands {
     /// Show the effective merged configuration (user + project + defaults)
     Show,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_long_help_keeps_push_first_workflow() {
+        let mut cmd = Cli::command();
+        let mut rendered = Vec::new();
+        cmd.write_long_help(&mut rendered).unwrap();
+        let help = String::from_utf8(rendered).unwrap();
+
+        assert!(help.contains("cq push auth-fix \"fix the auth bug\" --cwd ~/myproject"));
+        assert!(help.contains("Use cq push <name>"));
+        assert!(help.contains("cq push auth-fix \"now fix the edge case too\""));
+    }
 }
