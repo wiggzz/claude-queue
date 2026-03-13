@@ -371,6 +371,12 @@ pub fn ensure_user_config() {
                     pattern: None,
                     match_mode: MatchMode::default(),
                 },
+                Policy {
+                    tool: "ToolSearch".into(),
+                    action: "allow".into(),
+                    pattern: None,
+                    match_mode: MatchMode::default(),
+                },
             ],
             supervisor: SupervisorConfig {
                 enabled: true,
