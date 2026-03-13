@@ -156,14 +156,72 @@ fn resume_session(
 }
 
 /// Common launch logic for both start and resume.
+/// Pre-registers the session in DB, then spawns a background `cq run-session` process
+/// which is the direct parent of claude (so it can use proper child.wait()).
 fn launch(
     session_id: &str,
     claude_session_id: Option<&str>,
     name: Option<&str>,
     prompt_display: &str,
     cwd: &str,
-    extra_args: Vec<String>,
+    claude_args: Vec<String>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let cwd_abs = fs::canonicalize(cwd)?;
+    let db_path = config::db_path();
+
+    // Pre-register session in DB so it shows up in `cq list` immediately
+    let db = Db::open(&db_path)?;
+    db.create_session(
+        session_id,
+        claude_session_id,
+        name,
+        prompt_display,
+        &cwd_abs.to_string_lossy(),
+        0, // PID will be updated by run-session once claude is spawned
+    )?;
+
+    // Spawn the wrapper process that will be claude's direct parent
+    let cq_bin = std::env::current_exe().unwrap_or_else(|_| "cq".into());
+    let mut cmd = Command::new(&cq_bin);
+    cmd.args([
+        "run-session",
+        session_id,
+        "--cwd",
+        &cwd_abs.to_string_lossy(),
+        "--prompt-display",
+        prompt_display,
+    ]);
+    if let Some(csid) = claude_session_id {
+        cmd.args(["--claude-session-id", csid]);
+    }
+    if let Some(name) = name {
+        cmd.args(["--name", name]);
+    }
+    cmd.arg("--");
+    cmd.args(&claude_args);
+
+    let log_dir = config::log_dir();
+    fs::create_dir_all(&log_dir)?;
+    let wrapper_stderr_path = log_dir.join(format!("{session_id}.wrapper.stderr"));
+    let wrapper_stderr_file = fs::File::create(&wrapper_stderr_path)?;
+
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(wrapper_stderr_file)
+        .spawn()?;
+
+    Ok(session_id.to_string())
+}
+
+/// Run a session: spawn claude as a child process, wait for it, update DB, deliver queued messages.
+/// This is invoked as `cq run-session` — a background wrapper process that is the direct parent of claude.
+pub fn run_session(
+    session_id: &str,
+    name: Option<&str>,
+    cwd: &str,
+    prompt_display: &str,
+    claude_args: Vec<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let cwd_abs = fs::canonicalize(cwd)?;
     let project_root = resolve_project_root(&cwd_abs);
     let db_path = config::db_path();
@@ -193,10 +251,8 @@ fn launch(
     let settings_str = serde_json::to_string(&settings)?;
 
     let mut cmd = Command::new("claude");
-    for arg in &extra_args {
-        cmd.arg(arg);
-    }
-    let child = cmd
+    cmd.args(&claude_args);
+    let mut child = cmd
         .args([
             "--settings",
             &settings_str,
@@ -218,56 +274,26 @@ fn launch(
 
     let pid = child.id();
 
-    // Record in DB
+    // Update PID in DB now that claude is running
     let db = Db::open(&db_path)?;
-    db.create_session(
-        session_id,
-        claude_session_id,
-        name,
-        prompt_display,
-        &cwd_abs.to_string_lossy(),
-        pid,
-    )?;
+    db.update_session_pid(session_id, pid)?;
 
-    // Spawn a background process to wait for completion, update DB, and deliver queued messages.
-    // We can't use a thread because the CLI process exits immediately, killing any threads.
-    let cq_bin = std::env::current_exe().unwrap_or_else(|_| "cq".into());
-    let mut watcher_cmd = Command::new(&cq_bin);
-    watcher_cmd.args([
-        "wait-and-deliver",
-        session_id,
-        &pid.to_string(),
-        "--cwd",
-        &cwd_abs.to_string_lossy(),
-    ]);
-    if let Some(name) = name {
-        watcher_cmd.args(["--name", name]);
+    // Wait for claude to exit (we are its direct parent, so this is proper waitpid)
+    let status = child.wait();
+    match status {
+        Ok(s) => {
+            let code = s.code();
+            let st = if code == Some(0) {
+                "completed"
+            } else {
+                "failed"
+            };
+            let _ = db.update_session_status(session_id, st, code);
+        }
+        Err(_) => {
+            let _ = db.update_session_status(session_id, "failed", None);
+        }
     }
-    watcher_cmd
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
-    Ok(session_id.to_string())
-}
-
-/// Wait for a session's process to exit, update DB status, and deliver any queued messages.
-/// This runs as a separate background process spawned by `launch()`.
-pub fn wait_and_deliver(
-    session_id: &str,
-    pid: u32,
-    name: Option<&str>,
-    cwd: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Poll until the process exits (can't waitpid on a non-child process)
-    while is_pid_alive(pid.into()) {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    // Update session status based on log files
-    let db = Db::open(&config::db_path())?;
-    resolve_dead_session(&db, session_id);
 
     // Deliver any queued messages
     if let Some(name) = name {

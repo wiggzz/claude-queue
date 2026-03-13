@@ -40,13 +40,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run()?;
         }
 
-        Commands::WaitAndDeliver {
+        Commands::RunSession {
             session_id,
-            pid,
+            claude_session_id: _,
             name,
             cwd,
+            prompt_display,
+            claude_args,
         } => {
-            session::wait_and_deliver(&session_id, pid, name.as_deref(), &cwd)?;
+            session::run_session(
+                &session_id,
+                name.as_deref(),
+                &cwd,
+                &prompt_display,
+                claude_args,
+            )?;
         }
 
         Commands::Start { prompt, name, cwd } => {

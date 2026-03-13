@@ -135,6 +135,14 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_session_pid(&self, session_id: &str, pid: u32) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET pid = ?1 WHERE session_id = ?2",
+            params![pid, session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_session_status(
         &self,
         session_id: &str,

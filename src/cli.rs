@@ -205,19 +205,27 @@ pub enum Commands {
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
-    /// [internal] Wait for a session process to exit, update DB, and deliver queued messages
+    /// [internal] Spawn claude, wait for it to exit, update DB, and deliver queued messages.
+    /// This is the session wrapper process — it is the direct parent of claude.
     #[command(hide = true)]
-    WaitAndDeliver {
-        /// CQ session ID
+    RunSession {
+        /// CQ session ID (already registered in DB)
         session_id: String,
-        /// PID of the claude process to wait on
-        pid: u32,
+        /// Claude session ID (for --session-id or --resume)
+        #[arg(long)]
+        claude_session_id: Option<String>,
         /// Session name (for queue delivery)
         #[arg(long)]
         name: Option<String>,
-        /// Working directory fallback for resume
+        /// Working directory
         #[arg(long)]
         cwd: String,
+        /// Prompt display string (for DB)
+        #[arg(long)]
+        prompt_display: String,
+        /// Arguments to pass to claude
+        #[arg(last = true)]
+        claude_args: Vec<String>,
     },
 }
 
