@@ -40,6 +40,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             hook::run()?;
         }
 
+        Commands::WaitAndDeliver {
+            session_id,
+            pid,
+            name,
+            cwd,
+        } => {
+            session::wait_and_deliver(&session_id, pid, name.as_deref(), &cwd)?;
+        }
+
         Commands::Start { prompt, name, cwd } => {
             let session_id = session::start(&prompt, name.as_deref(), &cwd)?;
             let display = name.as_deref().unwrap_or(&session_id[..8]);

@@ -205,6 +205,20 @@ pub enum Commands {
     /// [internal] Hook entry point called by Claude Code's PreToolUse system
     #[command(hide = true)]
     Hook,
+    /// [internal] Wait for a session process to exit, update DB, and deliver queued messages
+    #[command(hide = true)]
+    WaitAndDeliver {
+        /// CQ session ID
+        session_id: String,
+        /// PID of the claude process to wait on
+        pid: u32,
+        /// Session name (for queue delivery)
+        #[arg(long)]
+        name: Option<String>,
+        /// Working directory fallback for resume
+        #[arg(long)]
+        cwd: String,
+    },
 }
 
 #[derive(Subcommand)]

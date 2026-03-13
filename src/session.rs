@@ -229,68 +229,78 @@ fn launch(
         pid,
     )?;
 
-    // Spawn a thread to wait for completion and update DB, then deliver queued messages
-    let sid = session_id.to_string();
-    let dbp = db_path.clone();
-    let session_name = name.map(|s| s.to_string());
-    let cwd_for_thread = cwd_abs.to_string_lossy().to_string();
-    std::thread::spawn(move || {
-        let mut child = child;
-        let status = child.wait();
-        if let Ok(db) = Db::open(&dbp) {
-            match status {
-                Ok(s) => {
-                    let code = s.code();
-                    let st = if code == Some(0) {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
-                    let _ = db.update_session_status(&sid, st, code);
-                }
-                Err(_) => {
-                    let _ = db.update_session_status(&sid, "failed", None);
-                }
-            }
+    // Spawn a background process to wait for completion, update DB, and deliver queued messages.
+    // We can't use a thread because the CLI process exits immediately, killing any threads.
+    let cq_bin = std::env::current_exe().unwrap_or_else(|_| "cq".into());
+    let mut watcher_cmd = Command::new(&cq_bin);
+    watcher_cmd.args([
+        "wait-and-deliver",
+        session_id,
+        &pid.to_string(),
+        "--cwd",
+        &cwd_abs.to_string_lossy(),
+    ]);
+    if let Some(name) = name {
+        watcher_cmd.args(["--name", name]);
+    }
+    watcher_cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()?;
 
-            // Check for queued messages and deliver them as a resume
-            if let Some(ref name) = session_name
-                && let Ok(messages) = db.take_all_queued_messages(name)
-                && !messages.is_empty()
-            {
-                let combined_prompt = messages
-                    .iter()
-                    .map(|(p, _)| p.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                // Use the last non-None cwd, falling back to the original session's cwd
-                let resume_cwd_owned = messages
-                    .iter()
-                    .rev()
-                    .find_map(|(_, c)| c.clone())
-                    .unwrap_or_else(|| cwd_for_thread.clone());
-                eprintln!(
-                    "Delivering {} queued message(s) for session {name}...",
-                    messages.len()
-                );
-                // Look up the session to get claude_session_id for resume
-                if let Ok(Some(sess)) = db.find_session(name) {
-                    match resume_session(name, &sess, &combined_prompt, &resume_cwd_owned) {
-                        Ok(new_id) => {
-                            eprintln!(
-                                "Queued messages delivered: session {name} resumed ({new_id})"
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to deliver queued messages for session {name}: {e}");
-                        }
+    Ok(session_id.to_string())
+}
+
+/// Wait for a session's process to exit, update DB status, and deliver any queued messages.
+/// This runs as a separate background process spawned by `launch()`.
+pub fn wait_and_deliver(
+    session_id: &str,
+    pid: u32,
+    name: Option<&str>,
+    cwd: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Poll until the process exits (can't waitpid on a non-child process)
+    while is_pid_alive(pid.into()) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // Update session status based on log files
+    let db = Db::open(&config::db_path())?;
+    resolve_dead_session(&db, session_id);
+
+    // Deliver any queued messages
+    if let Some(name) = name {
+        let messages = db.take_all_queued_messages(name)?;
+        if !messages.is_empty() {
+            let combined_prompt = messages
+                .iter()
+                .map(|(p, _)| p.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let resume_cwd = messages
+                .iter()
+                .rev()
+                .find_map(|(_, c)| c.as_deref())
+                .unwrap_or(cwd);
+            eprintln!(
+                "Delivering {} queued message(s) for session {name}...",
+                messages.len()
+            );
+            if let Some(sess) = db.find_session(name)? {
+                match resume_session(name, &sess, &combined_prompt, resume_cwd) {
+                    Ok(new_id) => {
+                        eprintln!("Queued messages delivered: session {name} resumed ({new_id})");
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to deliver queued messages for session {name}: {e}");
                     }
                 }
             }
         }
-    });
+    }
 
-    Ok(session_id.to_string())
+    Ok(())
 }
 
 /// Check the log file for a dead session and update DB status accordingly.
