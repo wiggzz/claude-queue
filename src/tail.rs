@@ -39,21 +39,20 @@ pub fn run(
     let db = Db::open(&config::db_path())?;
     let mut sessions = find_sessions(&db, session_filter)?;
 
-    // In follow mode, if we found DB sessions but no JSONL files yet, wait for them
-    if sessions.is_empty() && follow && session_filter.is_some() {
-        let has_db_sessions = has_matching_sessions(&db, session_filter)?;
-        if has_db_sessions {
-            if !json_mode {
-                eprintln!("{DIM}Waiting for session output...{RESET}");
+    // In follow mode, wait for sessions to appear if none found yet
+    if sessions.is_empty() && follow {
+        if !json_mode {
+            if let Some(filter) = session_filter {
+                eprintln!("{DIM}Waiting for sessions matching '{filter}'...{RESET}");
+            } else {
+                eprintln!("{DIM}Waiting for sessions...{RESET}");
             }
-            // Poll until JSONL appears or timeout
-            for _ in 0..150 {
-                // 30s max wait
-                std::thread::sleep(Duration::from_millis(200));
-                sessions = find_sessions(&db, session_filter)?;
-                if !sessions.is_empty() {
-                    break;
-                }
+        }
+        loop {
+            std::thread::sleep(Duration::from_millis(500));
+            sessions = find_sessions(&db, session_filter)?;
+            if !sessions.is_empty() {
+                break;
             }
         }
     }
@@ -162,22 +161,6 @@ pub fn run(
         }
 
         std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// Check if there are DB sessions matching the filter (even if JSONL doesn't exist yet).
-fn has_matching_sessions(
-    db: &Db,
-    session_filter: Option<&str>,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    if let Some(filter) = session_filter {
-        let by_name = db.find_sessions_by_name(filter)?;
-        if !by_name.is_empty() {
-            return Ok(true);
-        }
-        Ok(db.find_session(filter)?.is_some())
-    } else {
-        Ok(false)
     }
 }
 
