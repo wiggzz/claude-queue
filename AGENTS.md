@@ -19,3 +19,5 @@ cargo test
 ```
 
 Fix any issues before pushing.
+
+Commit using conventional commits.
