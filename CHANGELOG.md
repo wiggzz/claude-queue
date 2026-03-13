@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/wiggzz/claude-queue/compare/v0.5.0...v0.6.0) (2026-03-13)
+
+
+### Features
+
+* add ToolSearch to default auto-allow policy ([#24](https://github.com/wiggzz/claude-queue/issues/24)) ([c0938f5](https://github.com/wiggzz/claude-queue/commit/c0938f5c3b6dc36742f5f34eb507c2d423b77393))
+
+
+### Bug Fixes
+
+* show session names instead of IDs in cq pending ([#25](https://github.com/wiggzz/claude-queue/issues/25)) ([af40619](https://github.com/wiggzz/claude-queue/commit/af4061918bb995463b206c760122e1025f340b55))
+
 ## [0.5.0](https://github.com/wiggzz/claude-queue/compare/v0.4.0...v0.5.0) (2026-03-13)
 
 
