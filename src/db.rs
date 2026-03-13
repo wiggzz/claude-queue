@@ -135,6 +135,16 @@ impl Db {
         Ok(())
     }
 
+    /// Atomically claim a session for queued message delivery by transitioning its status.
+    /// Returns true if this caller won the race (status was updated), false if someone else got there first.
+    pub fn claim_session_for_delivery(&self, session_id: &str) -> rusqlite::Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE sessions SET status = 'delivering' WHERE session_id = ?1 AND status IN ('completed', 'failed')",
+            params![session_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn update_session_pid(&self, session_id: &str, pid: u32) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE sessions SET pid = ?1 WHERE session_id = ?2",
@@ -356,7 +366,8 @@ impl Db {
         &self,
         session_name: &str,
     ) -> rusqlite::Result<Vec<(String, Option<String>)>> {
-        let mut stmt = self.conn.prepare(
+        let tx = self.conn.unchecked_transaction()?;
+        let mut stmt = tx.prepare(
             "SELECT prompt, cwd FROM queued_messages WHERE session_name = ?1 ORDER BY id ASC",
         )?;
         let rows: Vec<(String, Option<String>)> = stmt
@@ -364,12 +375,14 @@ impl Db {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
         if !rows.is_empty() {
-            self.conn.execute(
+            tx.execute(
                 "DELETE FROM queued_messages WHERE session_name = ?1",
                 params![session_name],
             )?;
         }
+        tx.commit()?;
         Ok(rows)
     }
 

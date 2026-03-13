@@ -23,13 +23,21 @@ pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn s
 
     if let Some(sess) = db.find_session(name)? {
         let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
-        if sess.status == "running" && alive {
-            // Session is running — queue the message
+        if (sess.status == "running" && alive) || sess.status == "delivering" {
+            // Session is running or wrapper is delivering queued messages — queue this message.
+            // The wrapper will deliver it after the current session/delivery completes.
             let cwd_abs = fs::canonicalize(cwd)?;
             db.push_queued_message(name, prompt, Some(&cwd_abs.to_string_lossy()))?;
             return Ok(PushResult::Queued);
         }
-        // Session exists but is done — collect any queued messages + this one, resume
+        // Session exists but is done — claim it for delivery to prevent race with wrapper
+        if !db.claim_session_for_delivery(&sess.session_id)? {
+            // Wrapper already claimed — queue this message, it will be delivered
+            let cwd_abs = fs::canonicalize(cwd)?;
+            db.push_queued_message(name, prompt, Some(&cwd_abs.to_string_lossy()))?;
+            return Ok(PushResult::Queued);
+        }
+        // We won the claim — collect any queued messages + this one, resume
         let mut messages = db.take_all_queued_messages(name)?;
         messages.push((prompt.to_string(), Some(cwd.to_string())));
         let combined_prompt = messages
@@ -295,8 +303,12 @@ pub fn run_session(
         }
     }
 
-    // Deliver any queued messages
+    // Atomically claim the session for delivery — prevents race with concurrent `cq push`
     if let Some(name) = name {
+        if !db.claim_session_for_delivery(session_id)? {
+            // Another process (e.g. `cq push`) already claimed this session — let it handle delivery
+            return Ok(());
+        }
         let messages = db.take_all_queued_messages(name)?;
         if !messages.is_empty() {
             let combined_prompt = messages
