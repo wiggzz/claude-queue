@@ -201,9 +201,15 @@ fn find_sessions(
             .collect()
     };
 
+    let sessions = if session_filter.is_some() {
+        sessions.last().map(|sess| vec![sess]).unwrap_or_default()
+    } else {
+        sessions.iter().collect()
+    };
+
     let names = db.get_session_names().unwrap_or_default();
 
-    for s in &sessions {
+    for s in sessions {
         let display_name = names
             .get(&s.session_id)
             .cloned()
@@ -879,5 +885,39 @@ mod tests {
 
         let path = find_session_path(&session).unwrap();
         assert_eq!(path, file.path());
+    }
+
+    #[test]
+    fn test_find_sessions_with_filter_returns_only_latest_named_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(&dir.path().join("cq.db")).unwrap();
+
+        let first = NamedTempFile::new().unwrap();
+        let second = NamedTempFile::new().unwrap();
+        db.create_session(
+            "s1",
+            AgentBackend::Pi,
+            Some(first.path().to_string_lossy().as_ref()),
+            Some("same"),
+            "prompt 1",
+            ".",
+            Some(1),
+        )
+        .unwrap();
+        db.create_session(
+            "s2",
+            AgentBackend::Pi,
+            Some(second.path().to_string_lossy().as_ref()),
+            Some("same"),
+            "prompt 2",
+            ".",
+            Some(2),
+        )
+        .unwrap();
+
+        let sessions = find_sessions(&db, Some("same")).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].path, second.path());
+        assert_eq!(sessions[0].name, "same");
     }
 }
