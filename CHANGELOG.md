@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/wiggzz/claude-queue/compare/v0.8.0...v0.9.0) (2026-03-14)
+
+
+### Features
+
+* add cq tail for viewing session messages ([#21](https://github.com/wiggzz/claude-queue/issues/21)) ([65d2cc0](https://github.com/wiggzz/claude-queue/commit/65d2cc0de52e45cbbc2231b5a51751cd2d2eb90f))
+
 ## [0.8.0](https://github.com/wiggzz/claude-queue/compare/v0.7.0...v0.8.0) (2026-03-13)
 
 
