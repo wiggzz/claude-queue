@@ -308,14 +308,8 @@ struct StreamEvent {
 enum EventType {
     Text(String),
     Thinking(String),
-    ToolUse {
-        name: String,
-        input_summary: String,
-    },
-    ToolResult {
-        content_preview: String,
-        is_error: bool,
-    },
+    ToolUse { name: String, input_summary: String },
+    ToolResult { content: String, is_error: bool },
 }
 
 /// Parse a JSONL line into a StreamEvent, or None if it's not interesting.
@@ -397,15 +391,9 @@ fn parse_claude_event(line: &str) -> Option<StreamEvent> {
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let content_text = block.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    let preview = if content_text.len() > 200 {
-                        format!("{}...", &content_text[..197])
-                    } else {
-                        content_text.to_string()
-                    };
-                    let first_line = preview.lines().next().unwrap_or("").to_string();
                     return Some(StreamEvent {
                         event_type: EventType::ToolResult {
-                            content_preview: first_line,
+                            content: content_text.to_string(),
                             is_error,
                         },
                         timestamp: timestamp.clone(),
@@ -498,10 +486,9 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
             } else {
                 text
             };
-            let first_line = preview.lines().next().unwrap_or("").to_string();
             Some(StreamEvent {
                 event_type: EventType::ToolResult {
-                    content_preview: first_line,
+                    content: preview,
                     is_error,
                 },
                 timestamp,
@@ -527,22 +514,10 @@ fn print_event(color: &str, session_name: &str, event: &StreamEvent, show_sessio
 
     match &event.event_type {
         EventType::Text(text) => {
-            let lines: Vec<&str> = text.lines().take(3).collect();
-            let display = lines.join(" | ");
-            let truncated = if display.len() > 150 {
-                format!("{}...", &display[..147])
-            } else {
-                display
-            };
-            println!("{prefix} {DIM}text:{RESET} {truncated}");
+            print_block_event(&prefix, "text", text, None);
         }
         EventType::Thinking(thinking) => {
-            let truncated = if thinking.len() > 120 {
-                format!("{}...", &thinking[..117])
-            } else {
-                thinking.clone()
-            };
-            println!("{prefix} {DIM}thinking:{RESET} {truncated}");
+            print_block_event(&prefix, "thinking", thinking, None);
         }
         EventType::ToolUse {
             name,
@@ -550,22 +525,28 @@ fn print_event(color: &str, session_name: &str, event: &StreamEvent, show_sessio
         } => {
             println!("{prefix} {BOLD}{name}{RESET} {input_summary}");
         }
-        EventType::ToolResult {
-            content_preview,
-            is_error,
-        } => {
-            if *is_error {
-                println!("{prefix} {DIM}result:{RESET} \x1b[31m{content_preview}{RESET}");
-            } else if !content_preview.is_empty() {
-                let truncated = if content_preview.len() > 120 {
-                    format!("{}...", &content_preview[..117])
-                } else {
-                    content_preview.clone()
-                };
-                println!("{prefix} {DIM}result:{RESET} {truncated}");
-            }
+        EventType::ToolResult { content, is_error } => {
+            let color = if *is_error { Some("\x1b[31m") } else { None };
+            print_block_event(&prefix, "result", content, color);
         }
     }
+}
+
+fn print_block_event(prefix: &str, label: &str, body: &str, body_color: Option<&str>) {
+    println!("{prefix} {DIM}{label}:{RESET}");
+    for line in format_block_lines(body) {
+        match body_color {
+            Some(color) => println!("  {color}{line}{RESET}"),
+            None => println!("  {line}"),
+        }
+    }
+}
+
+fn format_block_lines(body: &str) -> Vec<String> {
+    if body.is_empty() {
+        return vec![String::new()];
+    }
+    body.lines().map(|line| line.to_string()).collect()
 }
 
 /// Print an event in JSON Lines format.
@@ -577,16 +558,13 @@ fn print_json_event(session_name: &str, event: &StreamEvent) {
             name,
             input_summary,
         } => ("tool_use", format!("{name}: {input_summary}")),
-        EventType::ToolResult {
-            content_preview,
-            is_error,
-        } => {
+        EventType::ToolResult { content, is_error } => {
             let label = if *is_error {
                 "tool_error"
             } else {
                 "tool_result"
             };
-            (label, content_preview.clone())
+            (label, content.clone())
         }
     };
 
@@ -722,7 +700,7 @@ mod tests {
         .to_string();
         let event = parse_event(AgentBackend::Claude, &line).unwrap();
         assert!(
-            matches!(event.event_type, EventType::ToolResult { ref content_preview, .. } if content_preview.contains("passed"))
+            matches!(event.event_type, EventType::ToolResult { ref content, .. } if content.contains("passed"))
         );
     }
 
@@ -859,8 +837,8 @@ mod tests {
         let event = parse_event(AgentBackend::Pi, &line).unwrap();
         assert!(matches!(
             event.event_type,
-            EventType::ToolResult { is_error: true, ref content_preview }
-                if content_preview.contains("ENOENT")
+            EventType::ToolResult { is_error: true, ref content }
+                if content.contains("ENOENT")
         ));
     }
 
@@ -919,5 +897,20 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].path, second.path());
         assert_eq!(sessions[0].name, "same");
+    }
+
+    #[test]
+    fn test_format_block_lines_preserves_paragraphs_without_pipes() {
+        let lines = format_block_lines(
+            "Yes. I ran `pwd` successfully and got:\n\n`/Users/wtj/src/github.com/wiggzz/claude-queue`",
+        );
+        assert_eq!(
+            lines,
+            vec![
+                "Yes. I ran `pwd` successfully and got:".to_string(),
+                "".to_string(),
+                "`/Users/wtj/src/github.com/wiggzz/claude-queue`".to_string(),
+            ]
+        );
     }
 }
