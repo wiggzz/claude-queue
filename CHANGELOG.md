@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/wiggzz/claude-queue/compare/v0.9.0...v0.10.0) (2026-03-14)
+
+
+### Features
+
+* support project-local db path ([#33](https://github.com/wiggzz/claude-queue/issues/33)) ([2c2c950](https://github.com/wiggzz/claude-queue/commit/2c2c95083ba471d9e5ce95209bac1250e9995755))
+
 ## [0.9.0](https://github.com/wiggzz/claude-queue/compare/v0.8.0...v0.9.0) (2026-03-14)
 
 
