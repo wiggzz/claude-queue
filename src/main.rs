@@ -9,6 +9,7 @@ mod hook;
 mod policy;
 mod session;
 mod supervisor;
+mod tail;
 mod update;
 mod watch;
 
@@ -595,74 +596,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Output { session_id, follow } => {
-            let db = open_db()?;
-
-            // If multiple sessions share a name, concatenate all their outputs
-            let sessions_by_name = db.find_sessions_by_name(&session_id)?;
-            let sessions = if sessions_by_name.len() > 1 {
-                sessions_by_name
-            } else {
-                let sess = db
-                    .find_session(&session_id)?
-                    .ok_or_else(|| format!("No session matching '{session_id}'"))?;
-                vec![sess]
-            };
-
-            let last_sess = sessions.last().unwrap();
-
-            // Resolve status of the most recent session
-            let status = if last_sess.status == "running" {
-                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
-                if !alive {
-                    session::resolve_dead_session(&db, &last_sess.session_id)
-                } else {
-                    last_sess.status.clone()
-                }
-            } else {
-                last_sess.status.clone()
-            };
-
-            if follow {
-                // For follow mode, only tail the most recent session
-                let mut last_len = 0;
-                loop {
-                    let content = session::get_output(&last_sess.session_id)?;
-                    if content.len() > last_len {
-                        print!("{}", &content[last_len..]);
-                        last_len = content.len();
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
-            } else {
-                let mut parts = Vec::new();
-                for sess in &sessions {
-                    if let Ok(content) = session::get_output(&sess.session_id)
-                        && !content.is_empty()
-                    {
-                        parts.push(content);
-                    }
-                }
-                let combined = parts.join("\n--- resumed ---\n");
-
-                if combined.is_empty() {
-                    let stderr = session::get_stderr(&last_sess.session_id).unwrap_or_default();
-                    if !stderr.trim().is_empty() {
-                        eprintln!(
-                            "Session {} ({}):\n{}",
-                            &last_sess.session_id[..8],
-                            status,
-                            stderr.trim()
-                        );
-                    } else if status == "running" {
-                        println!("(no output yet — session is still running)");
-                    } else {
-                        println!("(no output — session {})", status);
-                    }
-                } else {
-                    print!("{combined}");
-                }
-            }
+        Commands::Tail {
+            session,
+            num,
+            follow,
+            json,
+        } => {
+            tail::run(session.as_deref(), num, follow, json)?;
         }
 
         Commands::Wait { session_id } => {

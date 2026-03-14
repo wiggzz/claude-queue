@@ -38,6 +38,8 @@ POLICIES & SUPERVISOR:
   View active stack: cq policy list
 
 MONITORING:
+  cq tail               Show recent messages from running sessions
+  cq tail <name> -f     Follow a session's output in real-time
   cq watch              Live dashboard (sessions + pending approvals)
   cq audit --follow     Real-time decision log (run in a background task)"
 )]
@@ -148,13 +150,23 @@ pub enum Commands {
         /// Session ID (prefix match — first 8 chars is enough)
         session_id: String,
     },
-    /// View the raw output log, optionally following in real-time
-    Output {
-        /// Session ID (prefix match)
-        session_id: String,
-        /// Stream output as it's written (like tail -f)
+    /// Show recent session messages (like tail for your agents)
+    ///
+    /// Without a session argument, shows messages from all running sessions.
+    /// With a session argument, shows messages from the latest session matching that name/ID.
+    /// Use --follow to keep streaming new messages as they arrive.
+    Tail {
+        /// Session name or ID prefix
+        session: Option<String>,
+        /// Number of recent messages to show (default: 20)
+        #[arg(short = 'n', long, default_value = "20")]
+        num: usize,
+        /// Keep streaming new messages as they arrive
         #[arg(long, short)]
         follow: bool,
+        /// Output as JSON Lines
+        #[arg(long)]
+        json: bool,
     },
     /// Resume a session: cq resume <name-or-id> ["follow-up prompt"]
     ///
@@ -320,8 +332,8 @@ pub enum ConfigCommands {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
-    use clap::CommandFactory;
+    use super::{Cli, Commands};
+    use clap::{CommandFactory, Parser};
 
     #[test]
     fn test_long_help_keeps_push_first_workflow() {
@@ -333,5 +345,24 @@ mod tests {
         assert!(help.contains("cq push auth-fix \"fix the auth bug\" --cwd ~/myproject"));
         assert!(help.contains("Use cq push <name>"));
         assert!(help.contains("cq push auth-fix \"now fix the edge case too\""));
+    }
+
+    #[test]
+    fn test_tail_accepts_session_as_positional_argument() {
+        let cli = Cli::try_parse_from(["cq", "tail", "agent-name", "-f"]).unwrap();
+        match cli.command {
+            Commands::Tail {
+                session,
+                follow,
+                num,
+                json,
+            } => {
+                assert_eq!(session.as_deref(), Some("agent-name"));
+                assert!(follow);
+                assert_eq!(num, 20);
+                assert!(!json);
+            }
+            _ => panic!("expected Tail command"),
+        }
     }
 }
