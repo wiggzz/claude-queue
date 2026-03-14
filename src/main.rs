@@ -964,6 +964,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         "default_backend:            {} ({backend_source})",
                         merged.default_backend.as_str()
                     );
+                    let db_source = if project_exists && project_cfg.db.location.is_some() {
+                        "project"
+                    } else if user_cfg.db.location.is_some() {
+                        "user"
+                    } else {
+                        "default"
+                    };
+                    println!(
+                        "db.location:                {} ({db_source})",
+                        match merged.db.location {
+                            crate::config::DbLocation::User => "user",
+                            crate::config::DbLocation::ProjectLocal => "project_local",
+                        }
+                    );
 
                     println!();
                     println!("Backends:");

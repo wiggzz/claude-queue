@@ -11,13 +11,20 @@ pub enum PushResult {
     Resumed(String),
 }
 
+fn project_root_for_cwd(cwd: &Path) -> PathBuf {
+    config::resolve_project_dir(cwd)
+}
+
+fn db_path_for_cwd(cwd: &Path) -> PathBuf {
+    config::db_path_for(&project_root_for_cwd(cwd))
+}
+
 pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn std::error::Error>> {
-    let db = Db::open(&config::db_path())?;
+    let cwd_abs = fs::canonicalize(cwd)?;
+    let db = Db::open(&db_path_for_cwd(&cwd_abs))?;
 
     if let Some(sess) = db.find_session(name)? {
-        if let Ok(cwd_abs) = fs::canonicalize(cwd)
-            && cwd_abs.to_string_lossy() != sess._cwd
-        {
+        if cwd_abs.to_string_lossy() != sess._cwd {
             eprintln!(
                 "warning: --cwd '{}' differs from session's original cwd '{}'. Resume will use the original cwd.",
                 cwd_abs.display(),
@@ -27,13 +34,11 @@ pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn s
 
         let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
         if (sess.status == "running" && alive) || sess.status == "delivering" {
-            let cwd_abs = fs::canonicalize(cwd)?;
             db.push_queued_message(name, prompt, Some(&cwd_abs.to_string_lossy()))?;
             return Ok(PushResult::Queued);
         }
 
         if !db.claim_session_for_delivery(&sess.session_id)? {
-            let cwd_abs = fs::canonicalize(cwd)?;
             db.push_queued_message(name, prompt, Some(&cwd_abs.to_string_lossy()))?;
             return Ok(PushResult::Queued);
         }
@@ -64,7 +69,8 @@ pub fn interrupt(
     prompt: &str,
     cwd: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let db = Db::open(&config::db_path())?;
+    let cwd_abs = fs::canonicalize(cwd)?;
+    let db = Db::open(&db_path_for_cwd(&cwd_abs))?;
     let sess = db
         .find_session(name)?
         .ok_or_else(|| format!("No session found: {name}"))?;
@@ -87,7 +93,8 @@ pub fn interrupt(
 }
 
 pub fn cancel_queued(name: &str) -> Result<usize, Box<dyn std::error::Error>> {
-    let db = Db::open(&config::db_path())?;
+    let cwd = std::env::current_dir()?;
+    let db = Db::open(&db_path_for_cwd(&cwd))?;
     Ok(db.clear_queued_messages(name)?)
 }
 
@@ -98,8 +105,11 @@ pub fn start(
     cwd: &str,
     backend: Option<AgentBackend>,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let cwd_abs = fs::canonicalize(cwd)?;
+    let project_root = project_root_for_cwd(&cwd_abs);
+
     if let Some(name) = name {
-        let db = Db::open(&config::db_path())?;
+        let db = Db::open(&config::db_path_for(&project_root))?;
         if let Some(sess) = db.find_session(name)? {
             let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
             if sess.status == "running" && alive {
@@ -111,8 +121,6 @@ pub fn start(
         }
     }
 
-    let cwd_abs = fs::canonicalize(cwd)?;
-    let project_root = resolve_project_root(&cwd_abs);
     let config = config::Config::load(&project_root);
     let backend = select_backend(backend, &config);
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -136,9 +144,9 @@ pub fn resume(
     cwd: &str,
     backend: Option<AgentBackend>,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let db = Db::open(&config::db_path())?;
     let input_cwd_abs = fs::canonicalize(cwd)?;
-    let project_root = resolve_project_root(&input_cwd_abs);
+    let project_root = project_root_for_cwd(&input_cwd_abs);
+    let db = Db::open(&config::db_path_for(&project_root))?;
     let config = config::Config::load(&project_root);
 
     let (backend, agent_session_id, name, cwd_abs) =
@@ -258,7 +266,8 @@ fn launch(
     prompt_display: &str,
     cwd_abs: &Path,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let db_path = config::db_path();
+    let project_root = project_root_for_cwd(cwd_abs);
+    let db_path = config::db_path_for(&project_root);
     let log_dir = config::log_dir();
     fs::create_dir_all(&log_dir)?;
 
@@ -324,8 +333,8 @@ pub fn run_session(
     prompt: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let cwd_abs = fs::canonicalize(cwd)?;
-    let project_root = resolve_project_root(&cwd_abs);
-    let db_path = config::db_path();
+    let project_root = project_root_for_cwd(&cwd_abs);
+    let db_path = config::db_path_for(&project_root);
     let log_dir = config::log_dir();
     fs::create_dir_all(&log_dir)?;
 
@@ -659,39 +668,6 @@ fn js_string(input: &str) -> String {
 /// If `cwd` itself contains `.cq/config.json`, it is used directly (local config wins).
 /// Otherwise, for worktrees, returns the main repository's root.
 /// Falls back to `git rev-parse --show-toplevel`, then to the given cwd.
-pub fn resolve_project_root(cwd: &Path) -> PathBuf {
-    if cwd.join(".cq").join("config.json").exists() {
-        return cwd.to_path_buf();
-    }
-
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .current_dir(cwd)
-        .output()
-        && output.status.success()
-    {
-        let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let common_path = Path::new(&common_dir);
-        if let Some(root) = common_path.parent() {
-            return root.to_path_buf();
-        }
-    }
-
-    if let Ok(output) = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .current_dir(cwd)
-        .output()
-        && output.status.success()
-    {
-        let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !toplevel.is_empty() {
-            return PathBuf::from(toplevel);
-        }
-    }
-
-    cwd.to_path_buf()
-}
-
 pub fn is_pid_alive(pid: i64) -> bool {
     #[cfg(unix)]
     {
@@ -721,7 +697,7 @@ mod tests {
         fs::create_dir_all(&cq_dir).unwrap();
         fs::write(cq_dir.join("config.json"), r#"{"timeout": 100}"#).unwrap();
 
-        let result = resolve_project_root(dir.path());
+        let result = config::resolve_project_dir(dir.path());
         assert_eq!(result, dir.path());
     }
 
@@ -737,7 +713,7 @@ mod tests {
         let sub = dir.path().join("subdir");
         fs::create_dir_all(&sub).unwrap();
 
-        let result = resolve_project_root(&sub);
+        let result = config::resolve_project_dir(&sub);
         let canonical_dir = fs::canonicalize(dir.path()).unwrap();
         assert_eq!(result, canonical_dir);
     }
@@ -783,18 +759,18 @@ mod tests {
             .unwrap();
 
         let canonical_main = fs::canonicalize(main_dir.path()).unwrap();
-        assert_eq!(resolve_project_root(&wt_path), canonical_main);
+        assert_eq!(config::resolve_project_dir(&wt_path), canonical_main);
 
         let wt_cq = wt_path.join(".cq");
         fs::create_dir_all(&wt_cq).unwrap();
         fs::write(wt_cq.join("config.json"), r#"{"timeout": 111}"#).unwrap();
-        assert_eq!(resolve_project_root(&wt_path), wt_path);
+        assert_eq!(config::resolve_project_dir(&wt_path), wt_path);
     }
 
     #[test]
     fn test_resolve_project_root_non_git_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let result = resolve_project_root(dir.path());
+        let result = config::resolve_project_dir(dir.path());
         assert_eq!(result, dir.path());
     }
 

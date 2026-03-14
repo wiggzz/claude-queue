@@ -2,6 +2,7 @@ use crate::backend::AgentBackend;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// How to interpret the pattern field when matching tool input.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
@@ -66,6 +67,20 @@ impl BackendConfigs {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DbLocation {
+    #[default]
+    User,
+    ProjectLocal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DbConfig {
+    #[serde(default)]
+    pub location: DbLocation,
+}
+
 #[derive(Debug, Clone, Deserialize, Default)]
 pub(crate) struct RawSupervisorConfig {
     pub enabled: Option<bool>,
@@ -89,6 +104,11 @@ pub(crate) struct RawBackendConfigs {
     pub pi: RawBackendConfig,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct RawDbConfig {
+    pub location: Option<DbLocation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub timeout: u64,
@@ -96,6 +116,8 @@ pub struct Config {
     pub default_backend: AgentBackend,
     #[serde(default)]
     pub backends: BackendConfigs,
+    #[serde(default)]
+    pub db: DbConfig,
     pub policies: Vec<Policy>,
     pub supervisor: SupervisorConfig,
 }
@@ -107,6 +129,8 @@ pub(crate) struct RawConfig {
     pub default_backend: Option<AgentBackend>,
     #[serde(default)]
     pub backends: RawBackendConfigs,
+    #[serde(default)]
+    pub db: RawDbConfig,
     #[serde(default)]
     pub policies: Vec<Policy>,
     #[serde(default)]
@@ -120,6 +144,7 @@ impl Default for Config {
             poll_interval: default_poll_interval(),
             default_backend: AgentBackend::default(),
             backends: BackendConfigs::default(),
+            db: DbConfig::default(),
             policies: Vec::new(),
             supervisor: SupervisorConfig::default(),
         }
@@ -153,6 +178,7 @@ impl Config {
             poll_interval: raw.poll_interval.unwrap_or_else(default_poll_interval),
             default_backend: raw.default_backend.unwrap_or_default(),
             backends: load_backends(&raw.backends),
+            db: load_db(&raw.db),
             policies: raw.policies,
             supervisor: SupervisorConfig {
                 enabled: raw.supervisor.enabled.unwrap_or(false),
@@ -198,6 +224,7 @@ impl Config {
             .unwrap_or_else(default_poll_interval);
 
         let backends = merge_backends(&project_config.backends, &user_config.backends);
+        let db = merge_db(&project_config.db, &user_config.db);
 
         let mut policies = project_config.policies.clone();
         policies.extend(user_config.policies.clone());
@@ -235,6 +262,7 @@ impl Config {
                 .or(user_config.default_backend)
                 .unwrap_or_default(),
             backends,
+            db,
             policies,
             supervisor,
         }
@@ -273,6 +301,18 @@ fn merge_backends(project: &RawBackendConfigs, user: &RawBackendConfigs) -> Back
     }
 }
 
+fn load_db(raw: &RawDbConfig) -> DbConfig {
+    DbConfig {
+        location: raw.location.unwrap_or_default(),
+    }
+}
+
+fn merge_db(project: &RawDbConfig, user: &RawDbConfig) -> DbConfig {
+    DbConfig {
+        location: project.location.or(user.location).unwrap_or_default(),
+    }
+}
+
 /// Load a single config file (for editing project or user config directly).
 pub fn load_file(path: &Path) -> Config {
     Config::load_single(path)
@@ -295,7 +335,23 @@ pub fn db_path() -> PathBuf {
     if let Ok(path) = std::env::var("CQ_DB") {
         return PathBuf::from(path);
     }
-    dirs_home().join(".cq").join("cq.db")
+
+    let project_dir = std::env::var("CQ_PROJECT_DIR")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_else(|_| PathBuf::from("."));
+    db_path_for(&resolve_project_dir(&project_dir))
+}
+
+pub fn db_path_for(project_dir: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("CQ_DB") {
+        return PathBuf::from(path);
+    }
+
+    match Config::load(project_dir).db.location {
+        DbLocation::User => dirs_home().join(".cq").join("cq.db"),
+        DbLocation::ProjectLocal => project_dir.join(".cq").join("cq.db"),
+    }
 }
 
 pub fn log_dir() -> PathBuf {
@@ -306,6 +362,45 @@ fn dirs_home() -> PathBuf {
     std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+pub fn resolve_project_dir(cwd: &Path) -> PathBuf {
+    if cwd.join(".cq").join("config.json").exists() {
+        return cwd.to_path_buf();
+    }
+
+    for ancestor in cwd.ancestors().skip(1) {
+        if ancestor.join(".cq").join("config.json").exists() {
+            return ancestor.to_path_buf();
+        }
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(cwd)
+        .output()
+        && output.status.success()
+    {
+        let common_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let common_path = Path::new(&common_dir);
+        if let Some(root) = common_path.parent() {
+            return root.to_path_buf();
+        }
+    }
+
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        && output.status.success()
+    {
+        let toplevel = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !toplevel.is_empty() {
+            return PathBuf::from(toplevel);
+        }
+    }
+
+    cwd.to_path_buf()
 }
 
 /// Derive cq policies from Claude Code permission settings.
@@ -461,6 +556,7 @@ pub fn ensure_user_config() {
             poll_interval: default_poll_interval(),
             default_backend: AgentBackend::default(),
             backends: BackendConfigs::default(),
+            db: DbConfig::default(),
             policies: vec![
                 Policy {
                     tool: "Read".into(),
@@ -522,6 +618,7 @@ mod tests {
         assert_eq!(c.timeout, 86400);
         assert!((c.poll_interval - 0.5).abs() < f64::EPSILON);
         assert_eq!(c.default_backend, AgentBackend::Claude);
+        assert_eq!(c.db.location, DbLocation::User);
         assert!(c.policies.is_empty());
         assert!(!c.supervisor.enabled);
         assert_eq!(c.backends.claude.model, "");
@@ -583,6 +680,9 @@ mod tests {
                     model: "openai/gpt-5.4".into(),
                 },
             },
+            db: DbConfig {
+                location: DbLocation::ProjectLocal,
+            },
             policies: vec![Policy {
                 tool: "Write".into(),
                 action: "ask".into(),
@@ -608,6 +708,7 @@ mod tests {
         assert_eq!(loaded.timeout, 999);
         assert!((loaded.poll_interval - 1.5).abs() < f64::EPSILON);
         assert_eq!(loaded.default_backend, AgentBackend::Pi);
+        assert_eq!(loaded.db.location, DbLocation::ProjectLocal);
         assert_eq!(loaded.backends.claude.model, "sonnet");
         assert_eq!(loaded.backends.pi.model, "openai/gpt-5.4");
         assert_eq!(loaded.policies.len(), 1);
@@ -864,5 +965,55 @@ mod tests {
         assert_eq!(loaded.backends.pi.model, "openai/gpt-5.4");
         assert_eq!(loaded.supervisor.backends.claude.model, "haiku");
         assert_eq!(loaded.supervisor.backends.pi.model, "local/qwen");
+    }
+
+    #[test]
+    fn test_load_project_db_location_overrides_user_db_location() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(home.path().join(".cq")).unwrap();
+        fs::write(
+            home.path().join(".cq").join("config.json"),
+            r#"{"db":{"location":"user"}}"#,
+        )
+        .unwrap();
+
+        fs::create_dir_all(project.path().join(".cq")).unwrap();
+        fs::write(
+            project.path().join(".cq").join("config.json"),
+            r#"{"db":{"location":"project_local"}}"#,
+        )
+        .unwrap();
+
+        let loaded = Config::load_from_raw_paths(
+            &home.path().join(".cq").join("config.json"),
+            &project.path().join(".cq").join("config.json"),
+            project.path(),
+        );
+        assert_eq!(loaded.db.location, DbLocation::ProjectLocal);
+    }
+
+    #[test]
+    fn test_db_path_for_uses_project_local_db_when_configured() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(home.path().join(".cq")).unwrap();
+        fs::write(
+            home.path().join(".cq").join("config.json"),
+            r#"{"db":{"location":"user"}}"#,
+        )
+        .unwrap();
+
+        fs::create_dir_all(project.path().join(".cq")).unwrap();
+        fs::write(
+            project.path().join(".cq").join("config.json"),
+            r#"{"db":{"location":"project_local"}}"#,
+        )
+        .unwrap();
+
+        let path = db_path_for(project.path());
+        assert_eq!(path, project.path().join(".cq").join("cq.db"));
     }
 }

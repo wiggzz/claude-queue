@@ -74,6 +74,18 @@ Policies are configured in `~/.cq/config.json` (user) and `.cq/config.json` (pro
 }
 ```
 
+To keep session state in the project instead of `~/.cq/cq.db`, set:
+
+```json
+{
+  "db": {
+    "location": "project_local"
+  }
+}
+```
+
+With `project_local`, cq stores the SQLite DB at `.cq/cq.db` in the resolved project root. `CQ_DB` still overrides this for tests or one-off runs.
+
 ## Supervisor
 
 Enable an LLM supervisor to auto-approve/deny/escalate tool calls based on natural language rules:
