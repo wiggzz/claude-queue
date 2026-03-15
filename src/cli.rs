@@ -199,7 +199,11 @@ pub enum Commands {
         session_id: String,
     },
     /// Live dashboard: sessions + pending approvals, refreshes every 2s
-    Watch,
+    Watch {
+        /// Show all sessions, including older completed/failed ones
+        #[arg(long)]
+        all: bool,
+    },
     /// Discover and search non-cq-managed Claude Code sessions (Claude-only)
     Sessions {
         #[command(subcommand)]

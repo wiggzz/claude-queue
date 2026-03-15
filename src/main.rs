@@ -775,8 +775,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Watch => {
-            watch::run()?;
+        Commands::Watch { all } => {
+            watch::run(all)?;
         }
 
         Commands::Sessions { command } => {
@@ -1191,6 +1191,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub(crate) fn main_prompt_preview(prompt: &str, max_len: usize) -> String {
+    let first_line = prompt.lines().next().unwrap_or("");
+    if first_line.len() > max_len {
+        format!("{}...", &first_line[..max_len.saturating_sub(3)])
+    } else {
+        first_line.to_string()
+    }
+}
+
 fn print_session_result(session_id: &str, status: &str) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!(
         "Session {} {status}.",
@@ -1345,4 +1354,25 @@ fn tool_call_to_json(tc: &db::ToolCall) -> String {
         obj["summary"] = serde_json::Value::String(summary.clone());
     }
     serde_json::to_string(&obj).unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::main_prompt_preview;
+
+    #[test]
+    fn prompt_preview_truncates_at_first_newline() {
+        assert_eq!(
+            main_prompt_preview("first line\nsecond line", 50),
+            "first line"
+        );
+    }
+
+    #[test]
+    fn prompt_preview_truncates_first_line_by_length() {
+        assert_eq!(
+            main_prompt_preview("abcdefghijklmnopqrstuvwxyz", 10),
+            "abcdefg..."
+        );
+    }
 }
