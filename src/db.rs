@@ -577,6 +577,34 @@ impl Db {
         Ok(changed)
     }
 
+    pub fn count_queued_messages_for_names(
+        &self,
+        session_names: &[String],
+    ) -> rusqlite::Result<usize> {
+        if session_names.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: Vec<String> =
+            (1..=session_names.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "SELECT COUNT(*) FROM queued_messages WHERE session_name IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = session_names
+            .iter()
+            .map(|name| name as &dyn rusqlite::types::ToSql)
+            .collect();
+        self.conn
+            .query_row(&sql, params.as_slice(), |row| row.get(0))
+    }
+
+    pub fn delete_orphaned_queued_messages(&self) -> rusqlite::Result<usize> {
+        self.conn.execute(
+            "DELETE FROM queued_messages WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE sessions.name = queued_messages.session_name)",
+            [],
+        )
+    }
+
     #[allow(dead_code)]
     pub fn has_queued_messages(&self, session_name: &str) -> rusqlite::Result<bool> {
         let mut stmt = self
@@ -1023,6 +1051,51 @@ mod tests {
         assert_eq!(count, 0);
         // Original tool call still there
         assert_eq!(db.get_pending_tool_calls(None).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_delete_orphaned_queued_messages() {
+        let db = open_temp_db();
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, name, prompt, cwd, pid, status, started_at) VALUES ('old1', 'reused', 'p', '/tmp', 1, 'completed', '2020-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.push_queued_message("reused", "stale follow-up", Some("/tmp"))
+            .unwrap();
+
+        let deleted = db
+            .delete_sessions_older_than("2025-01-01 00:00:00")
+            .unwrap();
+        assert_eq!(deleted, vec!["old1".to_string()]);
+        assert!(db.has_queued_messages("reused").unwrap());
+
+        let cleared = db.delete_orphaned_queued_messages().unwrap();
+        assert_eq!(cleared, 1);
+        assert!(!db.has_queued_messages("reused").unwrap());
+    }
+
+    #[test]
+    fn test_delete_orphaned_queued_messages_preserves_active_session_name() {
+        let db = open_temp_db();
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, name, prompt, cwd, pid, status, started_at) VALUES ('old1', 'shared', 'p', '/tmp', 1, 'completed', '2020-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO sessions (session_id, name, prompt, cwd, pid, status, started_at) VALUES ('new1', 'shared', 'p', '/tmp', 2, 'completed', '2099-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.push_queued_message("shared", "follow-up", Some("/tmp"))
+            .unwrap();
+
+        let deleted = db
+            .delete_sessions_older_than("2025-01-01 00:00:00")
+            .unwrap();
+        assert_eq!(deleted, vec!["old1".to_string()]);
+
+        let cleared = db.delete_orphaned_queued_messages().unwrap();
+        assert_eq!(cleared, 0);
+        assert!(db.has_queued_messages("shared").unwrap());
     }
 
     #[test]

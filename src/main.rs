@@ -740,18 +740,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .sum();
 
+                let remaining_session_names: std::collections::HashSet<&str> = sessions
+                    .iter()
+                    .filter(|s| !(s.status != "running" && s.started_at < cutoff))
+                    .filter_map(|s| s.name.as_deref())
+                    .collect();
+                let orphaned_names: Vec<String> = old_sessions
+                    .iter()
+                    .filter_map(|s| s.name.as_ref())
+                    .filter(|name| !remaining_session_names.contains(name.as_str()))
+                    .cloned()
+                    .collect();
+                let queued_message_count = db.count_queued_messages_for_names(&orphaned_names)?;
+
                 for s in &old_sessions {
                     let display = s.name.as_deref().unwrap_or(&s.session_id[..8]);
                     println!("[dry-run] Would delete session: {display} ({})", s.status);
                 }
                 println!(
-                    "\n[dry-run] Would resolve {stale_count} stale session(s). Would delete {} session(s), {tool_call_count} tool call(s), and {log_count} log file(s).",
+                    "\n[dry-run] Would resolve {stale_count} stale session(s). Would delete {} session(s), {tool_call_count} tool call(s), {queued_message_count} queued message(s), and {log_count} log file(s).",
                     old_sessions.len()
                 );
             } else {
                 let deleted_ids = db.delete_sessions_older_than(&cutoff)?;
                 let session_count = deleted_ids.len();
                 let tool_call_count = db.delete_tool_calls_for_sessions(&deleted_ids)?;
+                let queued_message_count = db.delete_orphaned_queued_messages()?;
 
                 // Clean up log files
                 let log_dir = config::log_dir();
@@ -770,7 +784,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 }
 
                 println!(
-                    "Resolved {stale_count} stale session(s). Deleted {session_count} session(s), {tool_call_count} tool call(s). Cleaned up {log_count} log file(s)."
+                    "Resolved {stale_count} stale session(s). Deleted {session_count} session(s), {tool_call_count} tool call(s), and {queued_message_count} queued message(s). Cleaned up {log_count} log file(s)."
                 );
             }
         }
