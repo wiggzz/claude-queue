@@ -259,6 +259,221 @@ printf 'pi:%s\n' "$prompt"
 }
 
 #[test]
+fn start_named_running_session_queues_then_replaces_follow_up() {
+    let env = TestEnv::new(Some("pi"));
+    let fake_pi = env.install_script(
+        "pi",
+        r##"#!/bin/sh
+session_file=""
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session_file="$2"
+      shift 2
+      ;;
+    --extension)
+      shift 2
+      ;;
+    --print|--no-extensions)
+      shift
+      ;;
+    *)
+      prompt="$1"
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$session_file")"
+printf '%s\n' "$prompt" >> "$session_file"
+
+if [ "$prompt" = "first" ]; then
+  sleep 1
+fi
+
+printf 'pi:%s\n' "$prompt"
+"##,
+    );
+
+    let start = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "first", "--name", "queue-start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+
+    let queued = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "second", "--name", "queue-start"])
+        .output()
+        .unwrap();
+    assert!(queued.status.success(), "{queued:?}");
+    assert!(
+        String::from_utf8_lossy(&queued.stdout).contains("Queued message for running session"),
+        "{queued:?}"
+    );
+
+    let replaced = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "third", "--name", "queue-start"])
+        .output()
+        .unwrap();
+    assert!(replaced.status.success(), "{replaced:?}");
+    assert!(
+        String::from_utf8_lossy(&replaced.stdout)
+            .contains("Replaced queued message for running session"),
+        "{replaced:?}"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let conn = Connection::open(&env.db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions WHERE name = 'queue-start'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if count >= 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for resumed session"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    let wait = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["wait", "queue-start"])
+        .output()
+        .unwrap();
+    assert!(wait.status.success(), "{wait:?}");
+    assert!(
+        String::from_utf8_lossy(&wait.stdout).contains("pi:third"),
+        "{wait:?}"
+    );
+
+    let conn = Connection::open(&env.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sessions WHERE name = 'queue-start'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let session_path: String = conn
+        .query_row(
+            "SELECT agent_session_id FROM sessions WHERE name = 'queue-start' ORDER BY id ASC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let contents = fs::read_to_string(session_path).unwrap();
+    assert!(contents.contains("first"), "{contents}");
+    assert!(contents.contains("third"), "{contents}");
+    assert!(!contents.contains("second"), "{contents}");
+}
+
+#[test]
+fn start_cancel_clears_queued_follow_up() {
+    let env = TestEnv::new(Some("pi"));
+    let fake_pi = env.install_script(
+        "pi",
+        r##"#!/bin/sh
+session_file=""
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session_file="$2"
+      shift 2
+      ;;
+    --extension)
+      shift 2
+      ;;
+    --print|--no-extensions)
+      shift
+      ;;
+    *)
+      prompt="$1"
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$session_file")"
+printf '%s\n' "$prompt" >> "$session_file"
+
+if [ "$prompt" = "first" ]; then
+  sleep 1
+fi
+
+printf 'pi:%s\n' "$prompt"
+"##,
+    );
+
+    let start = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "first", "--name", "cancel-start"])
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+
+    let queued = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "second", "--name", "cancel-start"])
+        .output()
+        .unwrap();
+    assert!(queued.status.success(), "{queued:?}");
+
+    let cancel = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "--name", "cancel-start", "--cancel"])
+        .output()
+        .unwrap();
+    assert!(cancel.status.success(), "{cancel:?}");
+    assert!(
+        String::from_utf8_lossy(&cancel.stdout).contains("Cancelled 1 queued message"),
+        "{cancel:?}"
+    );
+
+    let wait = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["wait", "cancel-start"])
+        .output()
+        .unwrap();
+    assert!(wait.status.success(), "{wait:?}");
+    assert!(
+        String::from_utf8_lossy(&wait.stdout).contains("pi:first"),
+        "{wait:?}"
+    );
+
+    let conn = Connection::open(&env.db_path).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM queued_messages WHERE session_name = 'cancel-start'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
 fn claude_backend_arg_routes_through_claude_hook() {
     let env = TestEnv::new(None);
     let fake_claude = env.install_script(

@@ -545,6 +545,25 @@ impl Db {
         Ok(())
     }
 
+    pub fn replace_queued_messages(
+        &self,
+        session_name: &str,
+        prompt: &str,
+        cwd: Option<&str>,
+    ) -> rusqlite::Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let replaced = tx.execute(
+            "DELETE FROM queued_messages WHERE session_name = ?1",
+            params![session_name],
+        )?;
+        tx.execute(
+            "INSERT INTO queued_messages (session_name, prompt, cwd) VALUES (?1, ?2, ?3)",
+            params![session_name, prompt, cwd],
+        )?;
+        tx.commit()?;
+        Ok(replaced)
+    }
+
     pub fn take_all_queued_messages(
         &self,
         session_name: &str,

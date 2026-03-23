@@ -50,11 +50,14 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Start a fresh sub-agent session (always creates new, never queues or resumes).
-    /// Use `cq push` for the smart start/queue/resume behavior.
+    /// Start a sub-agent session.
+    ///
+    /// With `--name`, an existing running session queues the prompt as a follow-up instead of failing.
+    /// A second queued `start --name` replaces the pending follow-up.
     Start {
         /// The prompt to send to the sub-agent
-        prompt: String,
+        #[arg(required_unless_present = "cancel")]
+        prompt: Option<String>,
         /// Friendly name for this session (used with resume, result, etc.)
         #[arg(long, short)]
         name: Option<String>,
@@ -64,6 +67,9 @@ pub enum Commands {
         /// Backend to use (default: --backend, CQ_AGENT_BACKEND, config default_backend, then claude)
         #[arg(long, value_enum)]
         backend: Option<AgentBackend>,
+        /// Cancel any queued follow-up for this named session instead of starting or queuing a prompt
+        #[arg(long, requires = "name")]
+        cancel: bool,
     },
     /// Push a message to a session: starts, queues, or resumes as needed.
     ///
@@ -349,6 +355,29 @@ mod tests {
         assert!(help.contains("cq push auth-fix \"fix the auth bug\" --cwd ~/myproject"));
         assert!(help.contains("Use cq push <name>"));
         assert!(help.contains("cq push auth-fix \"now fix the edge case too\""));
+    }
+
+    #[test]
+    fn test_start_cancel_requires_name() {
+        assert!(Cli::try_parse_from(["cq", "start", "--cancel"]).is_err());
+    }
+
+    #[test]
+    fn test_start_cancel_without_prompt_parses() {
+        let cli = Cli::try_parse_from(["cq", "start", "--name", "agent", "--cancel"]).unwrap();
+        match cli.command {
+            Commands::Start {
+                prompt,
+                name,
+                cancel,
+                ..
+            } => {
+                assert_eq!(name.as_deref(), Some("agent"));
+                assert!(cancel);
+                assert!(prompt.is_none());
+            }
+            _ => panic!("expected Start command"),
+        }
     }
 
     #[test]

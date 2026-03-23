@@ -11,6 +11,11 @@ pub enum PushResult {
     Resumed(String),
 }
 
+pub enum StartResult {
+    Started(String),
+    Queued { replaced: bool },
+}
+
 fn project_root_for_cwd(cwd: &Path) -> PathBuf {
     config::resolve_project_dir(cwd)
 }
@@ -60,8 +65,10 @@ pub fn push(prompt: &str, name: &str, cwd: &str) -> Result<PushResult, Box<dyn s
         return Ok(PushResult::Resumed(session_id));
     }
 
-    let session_id = start(prompt, Some(name), cwd, None)?;
-    Ok(PushResult::Started(session_id))
+    match start(prompt, Some(name), cwd, None)? {
+        StartResult::Started(session_id) => Ok(PushResult::Started(session_id)),
+        StartResult::Queued { .. } => Ok(PushResult::Queued),
+    }
 }
 
 pub fn interrupt(
@@ -98,13 +105,13 @@ pub fn cancel_queued(name: &str) -> Result<usize, Box<dyn std::error::Error>> {
     Ok(db.clear_queued_messages(name)?)
 }
 
-/// Start a brand new sub-agent session.
+/// Start a brand new sub-agent session, or queue a follow-up for a running named session.
 pub fn start(
     prompt: &str,
     name: Option<&str>,
     cwd: &str,
     backend: Option<AgentBackend>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<StartResult, Box<dyn std::error::Error>> {
     let cwd_abs = fs::canonicalize(cwd)?;
     let project_root = project_root_for_cwd(&cwd_abs);
 
@@ -112,11 +119,12 @@ pub fn start(
         let db = Db::open(&config::db_path_for(&project_root))?;
         if let Some(sess) = db.find_session(name)? {
             let alive = sess.pid.map(is_pid_alive).unwrap_or(false);
-            if sess.status == "running" && alive {
-                return Err(format!(
-                    "Session '{name}' is already running. Use `cq push {name} \"...\"` to queue a message, or `cq interrupt {name} \"...\"` to kill and restart."
-                )
-                .into());
+            if (sess.status == "running" && alive) || sess.status == "delivering" {
+                let replaced =
+                    db.replace_queued_messages(name, prompt, Some(&cwd_abs.to_string_lossy()))?;
+                return Ok(StartResult::Queued {
+                    replaced: replaced > 0,
+                });
             }
         }
     }
@@ -126,7 +134,7 @@ pub fn start(
     let session_id = uuid::Uuid::new_v4().to_string();
     let agent_session_id = initial_agent_session_id(backend, &session_id);
 
-    launch(
+    let session_id = launch(
         &session_id,
         backend,
         &agent_session_id,
@@ -134,7 +142,8 @@ pub fn start(
         prompt,
         prompt,
         &cwd_abs,
-    )
+    )?;
+    Ok(StartResult::Started(session_id))
 }
 
 /// Resume a session. Accepts either a cq session ID prefix or a raw backend session ID.

@@ -68,10 +68,33 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             name,
             cwd,
             backend,
+            cancel,
         } => {
-            let session_id = session::start(&prompt, name.as_deref(), &cwd, backend)?;
-            let display = name.as_deref().unwrap_or(&session_id[..8]);
-            println!("Started session: {display} ({session_id})");
+            if cancel {
+                let name = name.ok_or("--cancel requires --name")?;
+                let count = session::cancel_queued(&name)?;
+                if count > 0 {
+                    println!("Cancelled {count} queued message(s) for session {name}.");
+                } else {
+                    println!("No queued messages for session {name}.");
+                }
+            } else {
+                let prompt = prompt.ok_or("missing prompt")?;
+                match session::start(&prompt, name.as_deref(), &cwd, backend)? {
+                    session::StartResult::Started(session_id) => {
+                        let display = name.as_deref().unwrap_or(&session_id[..8]);
+                        println!("Started session: {display} ({session_id})");
+                    }
+                    session::StartResult::Queued { replaced } => {
+                        let display = name.as_deref().unwrap_or("session");
+                        if replaced {
+                            println!("Replaced queued message for running session: {display}");
+                        } else {
+                            println!("Queued message for running session: {display}");
+                        }
+                    }
+                }
+            }
         }
 
         Commands::Push {
