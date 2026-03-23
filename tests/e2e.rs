@@ -138,18 +138,11 @@ impl TestEnv {
         self.wait_session_ex(name, timeout, 1)
     }
 
-    /// Get the result of the most recent session with this name.
+    /// Get session output for this name via `cq tail`.
     fn get_result(&self, name: &str) -> String {
-        let list = self.cq(&["list", "--session", name]);
-        // list is ordered DESC by id, so first line after header is the most recent
-        for line in list.stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if !parts.is_empty() {
-                let result = self.cq(&["result", parts[0]]);
-                return result.stdout;
-            }
-        }
-        panic!("No session found for name '{}'", name);
+        let result = self.cq(&["tail", name]);
+        assert!(result.success, "tail failed: {}", result.stderr);
+        result.stdout
     }
 }
 

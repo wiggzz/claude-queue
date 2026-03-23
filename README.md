@@ -35,10 +35,10 @@ cq approve all --match "cargo (build|test)"
 cq approve 5                          # approve by ID
 cq deny 5 --reason "don't touch that file"
 
-# Check status and results
+# Check status and output
 cq list
-cq result auth
-cq result tests
+cq tail auth
+cq tail tests
 
 # Wait for a session to finish
 cq wait auth
