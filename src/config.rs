@@ -348,8 +348,16 @@ pub fn db_path_for(project_dir: &Path) -> PathBuf {
         return PathBuf::from(path);
     }
 
-    match Config::load(project_dir).db.location {
-        DbLocation::User => dirs_home().join(".cq").join("cq.db"),
+    db_path_for_paths(project_dir, &user_config_path(), &dirs_home())
+}
+
+fn db_path_for_paths(project_dir: &Path, user_config_path: &Path, home_dir: &Path) -> PathBuf {
+    let project_config_path = project_config_path(project_dir);
+    match Config::load_from_raw_paths(user_config_path, &project_config_path, project_dir)
+        .db
+        .location
+    {
+        DbLocation::User => home_dir.join(".cq").join("cq.db"),
         DbLocation::ProjectLocal => project_dir.join(".cq").join("cq.db"),
     }
 }
@@ -1013,7 +1021,11 @@ mod tests {
         )
         .unwrap();
 
-        let path = db_path_for(project.path());
+        let path = db_path_for_paths(
+            project.path(),
+            &home.path().join(".cq").join("config.json"),
+            home.path(),
+        );
         assert_eq!(path, project.path().join(".cq").join("cq.db"));
     }
 }

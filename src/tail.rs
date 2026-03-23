@@ -308,6 +308,7 @@ struct StreamEvent {
 enum EventType {
     Text(String),
     Thinking(String),
+    UserText(String),
     ToolUse { name: String, input_summary: String },
     ToolResult { content: String, is_error: bool },
 }
@@ -385,19 +386,32 @@ fn parse_claude_event(line: &str) -> Option<StreamEvent> {
 
             for block in blocks {
                 let block_type = block.get("type").and_then(|v| v.as_str())?;
-                if block_type == "tool_result" {
-                    let is_error = block
-                        .get("is_error")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let content_text = block.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                    return Some(StreamEvent {
-                        event_type: EventType::ToolResult {
-                            content: content_text.to_string(),
-                            is_error,
-                        },
-                        timestamp: timestamp.clone(),
-                    });
+                match block_type {
+                    "tool_result" => {
+                        let is_error = block
+                            .get("is_error")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let content_text =
+                            block.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        return Some(StreamEvent {
+                            event_type: EventType::ToolResult {
+                                content: content_text.to_string(),
+                                is_error,
+                            },
+                            timestamp: timestamp.clone(),
+                        });
+                    }
+                    "text" => {
+                        let text = block.get("text").and_then(|v| v.as_str())?;
+                        if !text.trim().is_empty() {
+                            return Some(StreamEvent {
+                                event_type: EventType::UserText(text.to_string()),
+                                timestamp: timestamp.clone(),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
             None
@@ -470,6 +484,25 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
             }
             None
         }
+        Some("user") => {
+            let content = message.get("content")?.as_array()?;
+            let text = content
+                .iter()
+                .filter_map(|block| match block.get("type").and_then(|v| v.as_str()) {
+                    Some("text") => block.get("text").and_then(|v| v.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(StreamEvent {
+                    event_type: EventType::UserText(text),
+                    timestamp,
+                })
+            }
+        }
         Some("toolResult") => {
             let is_error = message
                 .get("isError")
@@ -519,6 +552,9 @@ fn print_event(color: &str, session_name: &str, event: &StreamEvent, show_sessio
         EventType::Thinking(thinking) => {
             print_block_event(&prefix, "thinking", thinking, None);
         }
+        EventType::UserText(text) => {
+            print_block_event(&prefix, "user", text, None);
+        }
         EventType::ToolUse {
             name,
             input_summary,
@@ -554,6 +590,7 @@ fn print_json_event(session_name: &str, event: &StreamEvent) {
     let (event_type, content) = match &event.event_type {
         EventType::Text(t) => ("text", t.clone()),
         EventType::Thinking(t) => ("thinking", t.clone()),
+        EventType::UserText(t) => ("user", t.clone()),
         EventType::ToolUse {
             name,
             input_summary,
@@ -738,16 +775,22 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_event_ignores_user_prompt() {
+    fn test_parse_event_user_prompt() {
         let line = serde_json::json!({
             "type": "user",
+            "timestamp": "2026-03-12T14:20:38.000Z",
             "message": {
                 "role": "user",
-                "content": "How do I do X?"
+                "content": [{"type": "text", "text": "How do I do X?"}]
             }
         })
         .to_string();
-        assert!(parse_event(AgentBackend::Claude, &line).is_none());
+        let event = parse_event(AgentBackend::Claude, &line).unwrap();
+        assert!(matches!(event.event_type, EventType::UserText(ref t) if t == "How do I do X?"));
+        assert_eq!(
+            event.timestamp,
+            Some("2026-03-12T14:20:38.000Z".to_string())
+        );
     }
 
     #[test]
@@ -816,6 +859,26 @@ mod tests {
         .to_string();
         let event = parse_event(AgentBackend::Pi, &line).unwrap();
         assert!(matches!(event.event_type, EventType::ToolUse { ref name, .. } if name == "Read"));
+    }
+
+    #[test]
+    fn test_parse_pi_event_user_text() {
+        let line = serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-03-12T14:20:38.000Z",
+            "message": {
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "Please fix the tests"
+                }]
+            }
+        })
+        .to_string();
+        let event = parse_event(AgentBackend::Pi, &line).unwrap();
+        assert!(
+            matches!(event.event_type, EventType::UserText(ref content) if content == "Please fix the tests")
+        );
     }
 
     #[test]
