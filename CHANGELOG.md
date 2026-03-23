@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.0](https://github.com/wiggzz/claude-queue/compare/v0.10.0...v0.11.0) (2026-03-23)
+
+
+### Features
+
+* consolidate result into tail ([#38](https://github.com/wiggzz/claude-queue/issues/38)) ([a841d9d](https://github.com/wiggzz/claude-queue/commit/a841d9d6b8ca129803f37d20b766120a6345eb4d))
+* improve tail context and watch session filtering ([#35](https://github.com/wiggzz/claude-queue/issues/35)) ([c1defcf](https://github.com/wiggzz/claude-queue/commit/c1defcff056fdec0be208cf4a352d2e8a56ad450))
+
 ## [0.10.0](https://github.com/wiggzz/claude-queue/compare/v0.9.0...v0.10.0) (2026-03-14)
 
 
