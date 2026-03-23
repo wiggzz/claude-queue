@@ -538,64 +538,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        Commands::Result { session_id } => {
-            let db = open_db()?;
-
-            // If multiple sessions share a name, concatenate all their outputs
-            let sessions_by_name = db.find_sessions_by_name(&session_id)?;
-            let sessions = if sessions_by_name.len() > 1 {
-                sessions_by_name
-            } else {
-                let sess = db
-                    .find_session(&session_id)?
-                    .ok_or_else(|| format!("No session matching '{session_id}'"))?;
-                vec![sess]
-            };
-
-            let last_sess = sessions.last().unwrap();
-
-            // Resolve status of the most recent session
-            let status = if last_sess.status == "running" {
-                let alive = last_sess.pid.map(session::is_pid_alive).unwrap_or(false);
-                if !alive {
-                    session::resolve_dead_session(&db, &last_sess.session_id)
-                } else {
-                    last_sess.status.clone()
-                }
-            } else {
-                last_sess.status.clone()
-            };
-
-            let mut parts = Vec::new();
-            for sess in &sessions {
-                if let Ok(content) = session::get_output(&sess.session_id) {
-                    let trimmed = content.trim();
-                    if !trimmed.is_empty() {
-                        parts.push(trimmed.to_string());
-                    }
-                }
-            }
-            let combined = parts.join("\n\n--- resumed ---\n\n");
-
-            if combined.is_empty() {
-                let stderr = session::get_stderr(&last_sess.session_id).unwrap_or_default();
-                if !stderr.trim().is_empty() {
-                    eprintln!(
-                        "Session {} ({}):\n{}",
-                        &last_sess.session_id[..8],
-                        status,
-                        stderr.trim()
-                    );
-                } else if status == "running" {
-                    println!("(no output yet — session is still running)");
-                } else {
-                    println!("(no output — session {})", status);
-                }
-            } else {
-                println!("{combined}");
-            }
-        }
-
         Commands::Tail {
             session,
             num,
