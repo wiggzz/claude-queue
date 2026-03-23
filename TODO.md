@@ -5,19 +5,10 @@
 
 Add guidance in `cq --help` (and README) that orchestrators should pass intent to sub-agents concisely — close to how a human would phrase it — rather than over-specifying step-by-step instructions. Sub-agents have full codebase access and can read project context (CLAUDE.md, AGENTS.md) themselves.
 
-When a sub-agent gets stuck or needs clarification, it should finish with a question in its output, which the orchestrator surfaces via `cq result` / `cq output` and can follow up with `cq resume`. The workflow is conversational, not fire-and-forget-with-perfect-instructions.
+When a sub-agent gets stuck or needs clarification, it should finish with a question in its output, which the orchestrator surfaces via `cq tail` and can follow up with `cq resume`. The workflow is conversational, not fire-and-forget-with-perfect-instructions.
 
 Anti-pattern: stuffing 20 lines of step-by-step instructions into the prompt.
 Good pattern: "rebase studio#640 onto #637 and update the PR base branch" + let the agent figure out the details.
-
-## Resume queuing for running sessions
-**Priority:** High — UX
-
-`cq start --name X "message"` on a still-running session should enqueue the message and deliver it as soon as the session completes, rather than spawning a new session or failing. This enables an orchestrator to fire-and-forget follow-ups without polling for completion first.
-
-A second `cq start --name X` while one is already queued should **replace** the pending message (not enqueue a second one). This keeps the model simple — at most one pending follow-up per session. `cq start --name X --cancel` cancels a queued-but-not-yet-delivered message.
-
-Current behavior: start/resume on a running session starts a new Claude session, which is confusing (two entries in `cq list` with the same name, the resumed one lacks the original context).
 
 ## Approval TUI / UI
 **Priority:** High — UX
@@ -56,26 +47,27 @@ The abstraction: an agent backend needs to support `start(prompt, cwd) -> sessio
 
 Currently the supervisor calls `claude -p` which has CLI startup overhead on every tool call. Call the Claude API directly via HTTP for lower latency. Could use the Anthropic SDK or raw curl.
 
-## Derive policies from Claude Code permissions
-**Priority:** High — zero-config UX
+## Bug: session marked failed after long-running command
+**Priority:** High — correctness
 
-cq should work well OOTB without any `.cq/config.json`. Instead of maintaining a separate policy config, read the user's existing Claude Code permission settings (`.claude/settings.json`, `~/.claude/settings.json`) to derive tool-call policies automatically. If Claude Code already trusts `Edit` and `Bash`, cq should too. This eliminates the need for users to configure permissions twice and makes cq a drop-in addition to any Claude Code workflow.
+**Symptom:** a session ran `corepack pnpm lint` (via `turbo run lint`) for ~25 minutes and the command completed, producing only a Node deprecation warning. The agent then emitted a thinking entry, produced no further output for ~24 minutes, and the session was marked as failed. No explicit error was reported.
 
-Fallback: if no Claude Code settings are found, use the current default policies (read-only tools auto-allowed, everything else goes to supervisor).
+Need:
+- a reliable repro
+- root cause investigation into why the session transitions to failed after long quiet periods
+- determine whether this is a Claude/backend behavior, cq timeout/status logic, or log/exit-code interpretation
 
-## Config: resolve project root from worktrees
-**Priority:** High — UX
+## Bug: Claude Code permissions not mapping correctly to cq policy
+**Priority:** High — correctness
 
-When running in a git worktree, `.cq/config.json` isn't present because it's untracked. The hook should find the project config by either:
-- Walking up the directory tree looking for `.cq/config.json` (simple but could be slow in hook hot path)
-- Having `cq start` resolve the project root at launch time and pass it via `CQ_PROJECT_DIR` env var (faster, single resolution)
+**Symptom:** `Edit` and `Write` operations on paths matching `/../**` are being escalated to the supervisor even though `.claude/settings.json` contains `Edit(/../**)` and `Write(/../**)` allow rules.
 
-This would eliminate the need to manually copy `.cq/config.json` into each worktree.
+Expected: these operations should be auto-allowed without supervisor involvement.
 
-## Supervisor: omit agent prompt from context by default
-**Priority:** High — security
-
-During this session, the supervisor approved `git push` despite its rules saying DENY, because the agent's prompt context ("Step 4: Push to main") convinced it to override its own rules. Fix: don't pass the session prompt/task to the supervisor by default. The supervisor should evaluate tool calls purely on their own merit against the rules. This can be an opt-in feature (`include_session_context: true` in config) for users who want the supervisor to allow things explicitly asked for by the agent's task.
+Need to verify:
+- how Claude Code path-glob permissions are parsed into cq policies
+- whether `/../**` normalization/path matching differs between Claude Code and cq
+- whether `Edit` and `Write` canonical tool inputs are being matched against the derived policy as intended
 
 ## README: prerequisites and contributing
 **Priority:** Medium — public release
@@ -86,23 +78,6 @@ README is missing:
 - Contributing guide (even a brief one)
 - Link to Claude Code itself for context
 - Better explanation of `cq watch` dashboard
-
-## CLI: show effective config (`cq config show`)
-**Priority:** Medium — UX
-
-`cq config show` (or `cq policy list --defaults`) should display the full effective config including defaults, user overrides, and project overrides. Makes it easy to see what's actually in effect without reading JSON files. Could also show where each setting comes from (default / user / project).
-
-## Bug: `cq result` returns resume response instead of original session output
-**Priority:** High — correctness
-
-When a session is resumed, `cq result` returns only the resumed session's final output, losing the original session's result. The original session created 3 PRs and had a detailed summary, but `cq result` just returns "Noted. Going forward I'll batch-dispatch..." from the follow-up resume.
-
-Expected: `cq result <name>` should return the most recent completed session's full output, or ideally concatenate original + resume outputs.
-
-## Bug: `cq pending` shows session IDs instead of names
-**Priority:** Medium — UX
-
-`cq pending` SESSION column shows the raw session ID (e.g. `d0e1ba77`) instead of the friendly name (e.g. `studio-stack`). Should always prefer the name when one exists, falling back to ID prefix. Same issue likely applies to resumed sessions not inheriting the original name.
 
 ## Bug: resumed session spins at 100% CPU with no output
 **Priority:** High — correctness
@@ -176,7 +151,7 @@ Add timing metrics so orchestrators (and humans) can see where time is being spe
 - **Total session duration** and **active vs waiting** breakdown
 - Surface in `cq list` (maybe a `--stats` flag) and `cq result`
 
-This would answer "why is this session taking so long?" — is it blocked on approvals, or doing expensive work (yarn install, cargo build, etc.)?
+This would answer "why is this session taking so long?" — is it blocked on approvals, or doing expensive work (yarn install, cargo build, etc.)? Surface in `cq list`, `cq tail`, and/or a dedicated stats view.
 
 ## Supervisor: include known Claude Code tools in system prompt
 **Priority:** Medium — correctness
@@ -226,7 +201,13 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Audit log: show session names instead of IDs~~
 - ~~Audit log: show bash command contents~~
 - ~~Audit log: show tool call details inline (`--verbose` flag)~~
+- ~~Derive policies from Claude Code permissions~~
+- ~~Config: resolve project root from worktrees~~
+- ~~Supervisor: omit agent prompt from context by default~~
 - ~~Bug: `cq result` returns resume response instead of original session output~~
+- ~~Bug: `cq pending` shows session IDs instead of names~~
 - ~~CLI: show effective config (`cq config show`)~~
+- ~~`cq list` prompt column should truncate at first newline~~
+- ~~cq watch: hide old completed sessions~~
 - ~~Session expiration (`cq gc` resolves stale running sessions)~~
 - ~~DB cleanup (`cq gc --older-than` prunes old sessions, tool calls, and log files)~~
