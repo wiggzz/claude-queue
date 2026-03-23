@@ -40,7 +40,7 @@ struct SessionSource {
 /// Show the last N messages from session(s), optionally following for new ones.
 pub fn run(
     session_filter: Option<&str>,
-    num_messages: usize,
+    num_messages: Option<usize>,
     follow: bool,
     json_mode: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -76,6 +76,13 @@ pub fn run(
 
     let mut color_idx: usize = 0;
     let multi_session = sessions.len() > 1;
+    let num_messages = num_messages.unwrap_or_else(|| {
+        if session_filter.is_some() {
+            usize::MAX
+        } else {
+            20
+        }
+    });
 
     // Show last N messages from each session
     for source in &sessions {
@@ -182,7 +189,7 @@ fn find_sessions(
     let mut results = Vec::new();
 
     let sessions = if let Some(filter) = session_filter {
-        // Try to find by name first, then by ID prefix
+        // Prefer exact-name matches so a resumed chain tails as one logical session.
         let by_name = db.find_sessions_by_name(filter)?;
         if !by_name.is_empty() {
             by_name
@@ -201,15 +208,9 @@ fn find_sessions(
             .collect()
     };
 
-    let sessions = if session_filter.is_some() {
-        sessions.last().map(|sess| vec![sess]).unwrap_or_default()
-    } else {
-        sessions.iter().collect()
-    };
-
     let names = db.get_session_names().unwrap_or_default();
 
-    for s in sessions {
+    for s in &sessions {
         let display_name = names
             .get(&s.session_id)
             .cloned()
@@ -866,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_sessions_with_filter_returns_only_latest_named_session() {
+    fn test_find_sessions_with_name_filter_returns_all_named_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let db = Db::open(&dir.path().join("cq.db")).unwrap();
 
@@ -894,9 +895,10 @@ mod tests {
         .unwrap();
 
         let sessions = find_sessions(&db, Some("same")).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].path, second.path());
-        assert_eq!(sessions[0].name, "same");
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].path, first.path());
+        assert_eq!(sessions[1].path, second.path());
+        assert!(sessions.iter().all(|session| session.name == "same"));
     }
 
     #[test]

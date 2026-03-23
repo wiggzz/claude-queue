@@ -15,7 +15,7 @@ QUICK START:
   3. cq pending                    # tool calls waiting for approval
   4. cq approve all                # approve everything pending
   5. cq list                       # check session statuses
-  6. cq result auth-fix            # get final output (by name or ID prefix)
+  6. cq tail auth-fix             # get session output (by name or ID prefix)
   7. cq push auth-fix \"now fix the edge case too\"
 
 BEST PRACTICES FOR ORCHESTRATORS:
@@ -28,7 +28,7 @@ BEST PRACTICES FOR ORCHESTRATORS:
   - Poll with: cq list (statuses) and cq pending (approvals) — both instant
   - Batch approve with filters:
       cq approve all [--session <name>] [--tool <tool>] [--match <regex>]
-  - Get output: cq result <name> once a session completes
+  - Get output: cq tail <name> once a session completes
 
 POLICIES & SUPERVISOR:
   Policies control which tools are auto-approved, denied, or escalated.
@@ -55,7 +55,7 @@ pub enum Commands {
     Start {
         /// The prompt to send to the sub-agent
         prompt: String,
-        /// Friendly name for this session (used with resume, result, etc.)
+        /// Friendly name for this session (used with resume, tail, etc.)
         #[arg(long, short)]
         name: Option<String>,
         /// Working directory for the sub-agent (default: current dir)
@@ -145,22 +145,20 @@ pub enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Get the final text output from a completed session
-    Result {
-        /// Session ID (prefix match — first 8 chars is enough)
-        session_id: String,
-    },
-    /// Show recent session messages (like tail for your agents)
+    /// Show session messages (like tail for your agents)
     ///
-    /// Without a session argument, shows messages from all running sessions.
-    /// With a session argument, shows messages from the latest session matching that name/ID.
+    /// Without a session argument, shows recent messages from all running sessions.
+    /// With a session name, shows the full output across that session's resume chain.
+    /// With a session ID/backend ID prefix, shows the matching session.
     /// Use --follow to keep streaming new messages as they arrive.
     Tail {
         /// Session name or ID prefix
         session: Option<String>,
-        /// Number of recent messages to show (default: 20)
-        #[arg(short = 'n', long, default_value = "20")]
-        num: usize,
+        /// Number of recent messages to show
+        ///
+        /// Defaults to 20 when tailing all running sessions, or all messages when a session is specified.
+        #[arg(short = 'n', long)]
+        num: Option<usize>,
         /// Keep streaming new messages as they arrive
         #[arg(long, short)]
         follow: bool,
@@ -345,6 +343,8 @@ mod tests {
         assert!(help.contains("cq push auth-fix \"fix the auth bug\" --cwd ~/myproject"));
         assert!(help.contains("Use cq push <name>"));
         assert!(help.contains("cq push auth-fix \"now fix the edge case too\""));
+        assert!(help.contains("Get output: cq tail <name>"));
+        assert!(!help.contains("cq result"));
     }
 
     #[test]
@@ -359,10 +359,18 @@ mod tests {
             } => {
                 assert_eq!(session.as_deref(), Some("agent-name"));
                 assert!(follow);
-                assert_eq!(num, 20);
+                assert_eq!(num, None);
                 assert!(!json);
             }
             _ => panic!("expected Tail command"),
         }
+    }
+
+    #[test]
+    fn test_result_command_is_rejected() {
+        let parsed = Cli::try_parse_from(["cq", "result", "agent-name"]);
+        assert!(parsed.is_err());
+        let rendered = parsed.err().unwrap().to_string();
+        assert!(rendered.contains("unrecognized subcommand 'result'"));
     }
 }
