@@ -89,7 +89,7 @@ Possible cause: resuming a session that's already at `last-prompt` state may cau
 ## Bug: completed sessions stuck as "running"
 **Priority:** High — correctness
 
-**Repro:** `cq start --name studio-637-fix --cwd .../studio "fix CI..."` — the agent completed its work (produced full output via `cq output`, pushed code to GitHub), but `cq list` still showed it as "running". The PID was gone (`ps aux | grep <session-id>` returned nothing). This led to a duplicate session being dispatched unnecessarily.
+**Repro:** `cq start --name studio-637-fix --cwd .../studio "fix CI..."` — the agent completed its work (produced full output via `cq tail`, pushed code to GitHub), but `cq list` still showed it as "running". The PID was gone (`ps aux | grep <session-id>` returned nothing). This led to a duplicate session being dispatched unnecessarily.
 
 Likely cause: the process exited but cq's background watcher didn't update the DB status. Could be a race in the wait/reap logic, or the watcher died before the session finished.
 
@@ -205,6 +205,7 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Config: resolve project root from worktrees~~
 - ~~Supervisor: omit agent prompt from context by default~~
 - ~~Bug: `cq result` returns resume response instead of original session output~~
+- ~~`cq tail` includes final stdout output for completed sessions~~
 - ~~Bug: `cq pending` shows session IDs instead of names~~
 - ~~CLI: show effective config (`cq config show`)~~
 - ~~`cq list` prompt column should truncate at first newline~~
