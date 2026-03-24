@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/wiggzz/claude-queue/compare/v0.11.0...v0.11.1) (2026-03-24)
+
+
+### Bug Fixes
+
+* show final session output in tail ([#41](https://github.com/wiggzz/claude-queue/issues/41)) ([477fd73](https://github.com/wiggzz/claude-queue/commit/477fd73b3e7806bb3e32c636995cff8c747f0a7d))
+
 ## [0.11.0](https://github.com/wiggzz/claude-queue/compare/v0.10.0...v0.11.0) (2026-03-23)
 
 
