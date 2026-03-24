@@ -32,6 +32,7 @@ struct TailState {
 }
 
 struct SessionSource {
+    session_id: String,
     backend: AgentBackend,
     name: String,
     path: PathBuf,
@@ -89,7 +90,8 @@ pub fn run(
         let color = COLORS[color_idx % COLORS.len()];
         color_idx += 1;
 
-        let events = read_last_n_events(source.backend, &source.path, num_messages)?;
+        let mut events = read_last_n_events(source.backend, &source.path, num_messages)?;
+        append_final_output_if_missing(&source.session_id, &mut events);
         for event in &events {
             if json_mode {
                 print_json_event(&source.name, event);
@@ -218,6 +220,7 @@ fn find_sessions(
 
         if let Some(path) = find_session_path(s) {
             results.push(SessionSource {
+                session_id: s.session_id.clone(),
                 backend: s.agent_backend,
                 name: display_name,
                 path,
@@ -261,6 +264,30 @@ fn read_last_n_events(
     // Take last N
     let skip = events.len().saturating_sub(n);
     Ok(events.into_iter().skip(skip).collect())
+}
+
+fn append_final_output_if_missing(session_id: &str, events: &mut Vec<StreamEvent>) {
+    let output = match crate::session::get_output(session_id) {
+        Ok(output) => output,
+        Err(_) => return,
+    };
+    let trimmed = output.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    let already_present = events.iter().any(|event| match &event.event_type {
+        EventType::Text(text) => text.trim() == trimmed || trimmed.contains(text.trim()),
+        _ => false,
+    });
+    if already_present {
+        return;
+    }
+
+    events.push(StreamEvent {
+        event_type: EventType::Text(trimmed.to_string()),
+        timestamp: None,
+    });
 }
 
 /// Read new lines from a JSONL file since last offset.
