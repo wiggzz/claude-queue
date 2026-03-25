@@ -86,21 +86,6 @@ README is missing:
 
 Possible cause: resuming a session that's already at `last-prompt` state may cause Claude Code to spin. Or the session-id + new prompt combination creates an invalid state. Need to investigate how `claude -p --session-id X "new prompt"` behaves when the session is already terminated.
 
-## Bug: `cq resume` should support native Claude session IDs correctly
-**Priority:** High — correctness
-
-**Symptom:** `cq resume` should accept native Claude backend conversation IDs (for example `d13733d0-96f2-499e-ba20-5469bf2f25ef`) as well as cq-managed session IDs, but currently it can silently resume a different cq session instead of failing or attaching to the requested Claude session.
-
-Expected behavior:
-- if the argument matches a cq-managed session, resume that session
-- if it is a native Claude session ID, attach to and resume that Claude session
-- if the input is ambiguous, fail loudly instead of resuming the wrong session
-
-Need to investigate:
-- matching precedence between cq session IDs, names, and backend session IDs
-- whether prefix matching is too permissive for native Claude IDs
-- how to safely distinguish managed cq sessions from raw Claude conversation IDs
-
 ## Bug: completed sessions stuck as "running"
 **Priority:** High — correctness
 
@@ -227,3 +212,4 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~cq watch: hide old completed sessions~~
 - ~~Session expiration (`cq gc` resolves stale running sessions)~~
 - ~~DB cleanup (`cq gc --older-than` prunes old sessions, tool calls, and log files)~~
+- ~~Bug: `cq resume` should support native Claude session IDs correctly~~
