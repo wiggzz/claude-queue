@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.11.2](https://github.com/wiggzz/claude-queue/compare/v0.11.1...v0.11.2) (2026-03-26)
+
+
+### Bug Fixes
+
+* normalize claude parent-relative path permissions ([#46](https://github.com/wiggzz/claude-queue/issues/46)) ([d73dc27](https://github.com/wiggzz/claude-queue/commit/d73dc27567159c48275a3c6b82f6e5e30be6364f))
+* resolve native Claude resume IDs safely ([#44](https://github.com/wiggzz/claude-queue/issues/44)) ([059b0e4](https://github.com/wiggzz/claude-queue/commit/059b0e465162129b5ec27059fe2cddcd63d901fe))
+* sanitize control characters in tail output ([#47](https://github.com/wiggzz/claude-queue/issues/47)) ([7a013a1](https://github.com/wiggzz/claude-queue/commit/7a013a16f52f2b4ebb74d7bef2fe2927fb205830))
+
 ## [0.11.1](https://github.com/wiggzz/claude-queue/compare/v0.11.0...v0.11.1) (2026-03-24)
 
 
