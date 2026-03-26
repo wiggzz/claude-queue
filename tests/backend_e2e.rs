@@ -596,6 +596,70 @@ printf 'claude:%s\n' "$prompt"
 }
 
 #[test]
+fn long_quiet_period_after_output_does_not_force_failed_status() {
+    let env = TestEnv::new(None);
+    let fake_claude = env.install_script(
+        "claude",
+        r#"#!/bin/sh
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p)
+      shift
+      ;;
+    --session-id|--settings|--permission-mode)
+      shift 2
+      ;;
+    --dangerously-skip-permissions)
+      shift
+      ;;
+    *)
+      prompt="$1"
+      shift
+      ;;
+  esac
+done
+
+printf 'finished command for:%s\n' "$prompt"
+sleep 1
+exit 1
+"#,
+    );
+
+    let output = env
+        .command()
+        .env("CQ_CLAUDE_BIN", &fake_claude)
+        .args([
+            "start",
+            "quiet afterward",
+            "--name",
+            "quiet-after-output",
+            "--backend",
+            "claude",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let wait = env
+        .command()
+        .env("CQ_CLAUDE_BIN", &fake_claude)
+        .args(["wait", "quiet-after-output"])
+        .output()
+        .unwrap();
+    assert!(
+        wait.status.success(),
+        "expected session with output-only nonzero exit to be treated as completed: {wait:?}"
+    );
+
+    let stdout = String::from_utf8_lossy(&wait.stdout);
+    assert!(
+        stdout.contains("finished command for:quiet afterward"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn pi_session_model_from_config_is_passed_to_backend() {
     let env = TestEnv::new(Some("pi"));
     fs::write(
