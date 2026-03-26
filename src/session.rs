@@ -148,47 +148,16 @@ pub fn resume(
     let project_root = project_root_for_cwd(&input_cwd_abs);
     let db = Db::open(&config::db_path_for(&project_root))?;
     let config = config::Config::load(&project_root);
+    let sessions = db.get_sessions()?;
 
-    let (backend, agent_session_id, name, cwd_abs) =
-        if let Some(sess) = db.find_session(id_or_prefix)? {
-            if let Some(requested_backend) = backend
-                && requested_backend != sess.agent_backend
-            {
-                return Err(format!(
-                    "Session '{}' uses backend '{}', not '{}'",
-                    id_or_prefix,
-                    sess.agent_backend.as_str(),
-                    requested_backend.as_str()
-                )
-                .into());
-            }
-
-            let agent_session_id = sess
-                .agent_session_id
-                .clone()
-                .or(sess.claude_session_id.clone())
-                .unwrap_or_else(|| {
-                    if sess.agent_backend == AgentBackend::Claude {
-                        sess.session_id.clone()
-                    } else {
-                        id_or_prefix.to_string()
-                    }
-                });
-
-            (
-                sess.agent_backend,
-                agent_session_id,
-                sess.name,
-                PathBuf::from(&sess._cwd),
-            )
-        } else {
-            (
-                select_backend(backend, &config),
-                id_or_prefix.to_string(),
-                None,
-                input_cwd_abs,
-            )
-        };
+    let (backend, agent_session_id, name, cwd_abs) = resolve_resume_target(
+        &sessions,
+        id_or_prefix,
+        backend,
+        select_backend(backend, &config),
+        &input_cwd_abs,
+    )
+    .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
     let cq_session_id = uuid::Uuid::new_v4().to_string();
     let display_prompt = format!(
@@ -205,6 +174,103 @@ pub fn resume(
         &display_prompt,
         &cwd_abs,
     )
+}
+
+fn resolve_resume_target(
+    sessions: &[crate::db::Session],
+    query: &str,
+    requested_backend: Option<AgentBackend>,
+    default_backend: AgentBackend,
+    input_cwd_abs: &Path,
+) -> Result<(AgentBackend, String, Option<String>, PathBuf), String> {
+    if let Some(session) = resolve_managed_resume_session(sessions, query)? {
+        if let Some(requested_backend) = requested_backend
+            && requested_backend != session.agent_backend
+        {
+            return Err(format!(
+                "Session '{}' uses backend '{}', not '{}'",
+                query,
+                session.agent_backend.as_str(),
+                requested_backend.as_str()
+            ));
+        }
+
+        let agent_session_id = session
+            .agent_session_id
+            .clone()
+            .or(session.claude_session_id.clone())
+            .unwrap_or_else(|| {
+                if session.agent_backend == AgentBackend::Claude {
+                    session.session_id.clone()
+                } else {
+                    query.to_string()
+                }
+            });
+
+        return Ok((
+            session.agent_backend,
+            agent_session_id,
+            session.name.clone(),
+            PathBuf::from(&session._cwd),
+        ));
+    }
+
+    if default_backend == AgentBackend::Claude && looks_like_claude_session_id(query) {
+        return Ok((
+            default_backend,
+            query.to_string(),
+            None,
+            input_cwd_abs.to_path_buf(),
+        ));
+    }
+
+    Err(format!(
+        "No session found for '{query}'. Use a cq session name, cq session ID prefix, or a full Claude session UUID."
+    ))
+}
+
+fn resolve_managed_resume_session<'a>(
+    sessions: &'a [crate::db::Session],
+    query: &str,
+) -> Result<Option<&'a crate::db::Session>, String> {
+    if let Some(session) = sessions
+        .iter()
+        .find(|session| session.name.as_deref() == Some(query))
+    {
+        return Ok(Some(session));
+    }
+
+    if let Some(session) = sessions.iter().find(|session| session.session_id == query) {
+        return Ok(Some(session));
+    }
+
+    let session_id_prefix_matches: Vec<_> = sessions
+        .iter()
+        .filter(|session| session.session_id.starts_with(query))
+        .collect();
+    match session_id_prefix_matches.len() {
+        0 => {}
+        1 => return Ok(Some(session_id_prefix_matches[0])),
+        _ => {
+            let ids = session_id_prefix_matches
+                .iter()
+                .map(|session| session.session_id[..8.min(session.session_id.len())].to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "Session prefix '{query}' is ambiguous; matches cq sessions: {ids}"
+            ));
+        }
+    }
+
+    Ok(sessions.iter().find(|session| {
+        session.agent_session_id.as_deref() == Some(query)
+            || session.claude_session_id.as_deref() == Some(query)
+    }))
+}
+
+fn looks_like_claude_session_id(query: &str) -> bool {
+    uuid::Uuid::parse_str(query).is_ok()
 }
 
 fn resume_session(
@@ -772,6 +838,129 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = config::resolve_project_dir(dir.path());
         assert_eq!(result, dir.path());
+    }
+
+    fn test_session(
+        session_id: &str,
+        agent_backend: AgentBackend,
+        agent_session_id: Option<&str>,
+        name: Option<&str>,
+        cwd: &str,
+    ) -> crate::db::Session {
+        crate::db::Session {
+            _id: 0,
+            session_id: session_id.to_string(),
+            agent_backend,
+            agent_session_id: agent_session_id.map(str::to_string),
+            claude_session_id: (agent_backend == AgentBackend::Claude)
+                .then(|| agent_session_id.map(str::to_string))
+                .flatten(),
+            name: name.map(str::to_string),
+            prompt: "prompt".to_string(),
+            _cwd: cwd.to_string(),
+            status: "completed".to_string(),
+            pid: None,
+            started_at: "2026-03-25T00:00:00Z".to_string(),
+            _completed_at: None,
+            _exit_code: Some(0),
+        }
+    }
+
+    #[test]
+    fn test_resolve_resume_target_prefers_exact_managed_backend_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = vec![
+            test_session(
+                "cq-newer",
+                AgentBackend::Claude,
+                Some("11111111-1111-1111-1111-111111111111"),
+                Some("task"),
+                "/managed",
+            ),
+            test_session(
+                "11111111-prefix-collision",
+                AgentBackend::Claude,
+                Some("other-native-session"),
+                Some("other"),
+                "/other",
+            ),
+        ];
+
+        let (_, agent_session_id, name, cwd) = resolve_resume_target(
+            &sessions,
+            "11111111-1111-1111-1111-111111111111",
+            None,
+            AgentBackend::Claude,
+            dir.path(),
+        )
+        .unwrap();
+
+        assert_eq!(agent_session_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(name.as_deref(), Some("task"));
+        assert_eq!(cwd, PathBuf::from("/managed"));
+    }
+
+    #[test]
+    fn test_resolve_resume_target_rejects_ambiguous_cq_session_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = vec![
+            test_session(
+                "abc12345-old",
+                AgentBackend::Claude,
+                Some("native-1"),
+                None,
+                "/one",
+            ),
+            test_session(
+                "abc12345-new",
+                AgentBackend::Claude,
+                Some("native-2"),
+                None,
+                "/two",
+            ),
+        ];
+
+        let err = resolve_resume_target(
+            &sessions,
+            "abc12345",
+            None,
+            AgentBackend::Claude,
+            dir.path(),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("ambiguous"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_resolve_resume_target_allows_unmanaged_full_claude_session_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = vec![test_session(
+            "cq-session",
+            AgentBackend::Claude,
+            Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+            Some("task"),
+            "/managed",
+        )];
+        let native_id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+
+        let (backend, agent_session_id, name, cwd) =
+            resolve_resume_target(&sessions, native_id, None, AgentBackend::Claude, dir.path())
+                .unwrap();
+
+        assert_eq!(backend, AgentBackend::Claude);
+        assert_eq!(agent_session_id, native_id);
+        assert!(name.is_none());
+        assert_eq!(cwd, dir.path());
+    }
+
+    #[test]
+    fn test_resolve_resume_target_rejects_non_uuid_unmanaged_query() {
+        let dir = tempfile::tempdir().unwrap();
+        let err =
+            resolve_resume_target(&[], "not-a-session", None, AgentBackend::Claude, dir.path())
+                .unwrap_err();
+        assert!(err.contains("No session found"), "unexpected error: {err}");
     }
 
     struct EnvGuard {
