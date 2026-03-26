@@ -492,11 +492,10 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
             });
         }
 
-        // For path-based tools, strip leading // (Claude Code's absolute path convention)
-        let pattern_str = if matches!(tool, "Read" | "Edit" | "Write" | "Glob" | "Grep")
-            && pattern_str.starts_with("//")
-        {
-            &pattern_str[1..] // "//Users/..." → "/Users/..."
+        // For path-based tools, normalize Claude Code path prefixes to the form used in
+        // canonical tool inputs.
+        let pattern_str = if matches!(tool, "Read" | "Edit" | "Write" | "Glob" | "Grep") {
+            normalize_claude_code_path_pattern(pattern_str)
         } else {
             pattern_str
         };
@@ -518,6 +517,19 @@ fn parse_claude_code_permission(entry: &str, action: &str) -> Option<Policy> {
             pattern: None,
             match_mode: MatchMode::Regex,
         })
+    }
+}
+
+fn normalize_claude_code_path_pattern(pattern: &str) -> &str {
+    if pattern.starts_with("//") {
+        // Claude Code uses // for absolute paths in settings, but tool inputs use a single /.
+        &pattern[1..]
+    } else if pattern == "/.." || pattern.starts_with("/../") {
+        // Claude Code emits parent-relative path permissions with a leading slash, while the
+        // canonical tool input keeps them as ../foo.
+        &pattern[1..]
+    } else {
+        pattern
     }
 }
 
@@ -777,6 +789,19 @@ mod tests {
         // Should match actual file_path values (single slash)
         assert!(re.is_match("/Users/wtj/src/foo/bar.rs"));
         assert!(!re.is_match("/Users/other/file.rs"));
+    }
+
+    #[test]
+    fn test_parse_claude_code_permission_parent_relative_path_pattern() {
+        let p = parse_claude_code_permission("Edit(/../**)", "allow").unwrap();
+        assert_eq!(p.tool, "Edit");
+        assert_eq!(p.action, "allow");
+        let pat = p.pattern.unwrap();
+        let re = regex::Regex::new(&pat).unwrap();
+        // Claude Code's /../** should match tool inputs like ../foo.rs
+        assert!(re.is_match("../foo.rs"));
+        assert!(re.is_match("../nested/foo.rs"));
+        assert!(!re.is_match("src/foo.rs"));
     }
 
     #[test]

@@ -60,14 +60,11 @@ Need:
 ## Bug: Claude Code permissions not mapping correctly to cq policy
 **Priority:** High — correctness
 
-**Symptom:** `Edit` and `Write` operations on paths matching `/../**` are being escalated to the supervisor even though `.claude/settings.json` contains `Edit(/../**)` and `Write(/../**)` allow rules.
+Resolved in this branch.
 
-Expected: these operations should be auto-allowed without supervisor involvement.
+**Root cause:** Claude Code permission entries like `Edit(/../**)` and `Write(/../**)` were parsed into regexes that expected paths starting with `/../...`, but canonical `Edit`/`Write` tool inputs use parent-relative paths like `../...` (no leading slash). That mismatch caused policy lookup to miss and fall through to supervisor escalation.
 
-Need to verify:
-- how Claude Code path-glob permissions are parsed into cq policies
-- whether `/../**` normalization/path matching differs between Claude Code and cq
-- whether `Edit` and `Write` canonical tool inputs are being matched against the derived policy as intended
+**Fix:** Normalize Claude Code parent-relative path permissions during policy derivation so `/../**` is matched against canonical tool inputs as `../**`. Added regression tests around permission parsing plus `Edit`/`Write` policy matching.
 
 ## README: prerequisites and contributing
 **Priority:** Medium — public release

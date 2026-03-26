@@ -270,6 +270,28 @@ mod tests {
     }
 
     #[test]
+    fn test_edit_matches_parent_relative_path_policy() {
+        let policies = vec![policy("Edit", "allow", Some(r"(?s)^\.\./.*"))];
+
+        let input = r#"{"file_path": "../src/main.rs", "old_string": "x", "new_string": "y"}"#;
+        assert_eq!(check("Edit", input, &policies), Some("allow".into()));
+
+        let input2 = r#"{"file_path": "src/main.rs", "old_string": "x", "new_string": "y"}"#;
+        assert_eq!(check("Edit", input2, &policies), None);
+    }
+
+    #[test]
+    fn test_write_matches_parent_relative_path_policy() {
+        let policies = vec![policy("Write", "allow", Some(r"(?s)^\.\./.*"))];
+
+        let input = r#"{"file_path": "../notes/todo.md", "content": "hi"}"#;
+        assert_eq!(check("Write", input, &policies), Some("allow".into()));
+
+        let input2 = r#"{"file_path": "notes/todo.md", "content": "hi"}"#;
+        assert_eq!(check("Write", input2, &policies), None);
+    }
+
+    #[test]
     fn test_webfetch_matches_url() {
         let policies = vec![policy("WebFetch", "allow", Some(r"^https://docs\.rs/"))];
 
