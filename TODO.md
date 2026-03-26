@@ -66,16 +66,6 @@ Resolved in this branch.
 
 **Fix:** Normalize Claude Code parent-relative path permissions during policy derivation so `/../**` is matched against canonical tool inputs as `../**`. Added regression tests around permission parsing plus `Edit`/`Write` policy matching.
 
-## README: prerequisites and contributing
-**Priority:** Medium — public release
-
-README is missing:
-- Prerequisites section (Rust/Cargo, Claude Code CLI, minimum version requirements)
-- Note about Rust 2024 edition requiring recent toolchain
-- Contributing guide (even a brief one)
-- Link to Claude Code itself for context
-- Better explanation of `cq watch` dashboard
-
 ## Bug: resumed session spins at 100% CPU with no output
 **Priority:** High — correctness
 
@@ -201,6 +191,7 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Derive policies from Claude Code permissions~~
 - ~~Config: resolve project root from worktrees~~
 - ~~Supervisor: omit agent prompt from context by default~~
+- ~~README: prerequisites and contributing~~
 - ~~Bug: `cq result` returns resume response instead of original session output~~
 - ~~`cq tail` includes final stdout output for completed sessions~~
 - ~~Bug: `cq tail` sanitizes control characters in rendered output~~
