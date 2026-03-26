@@ -1,9 +1,11 @@
 use crate::backend::AgentBackend;
 use crate::config;
 use crate::db::Db;
+use rusqlite::Error as SqliteError;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 pub enum PushResult {
     Started(String),
@@ -323,6 +325,9 @@ fn initial_agent_session_id(backend: AgentBackend, session_id: &str) -> String {
     }
 }
 
+const SESSION_DB_WRITE_RETRIES: usize = 6;
+const SESSION_DB_WRITE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
 fn launch(
     session_id: &str,
     backend: AgentBackend,
@@ -459,7 +464,7 @@ pub fn run_session(
         Err(_) => ("failed", None),
     };
 
-    let _ = db.update_session_status(session_id, final_status, exit_code);
+    update_session_status_with_retry(&db_path, session_id, final_status, exit_code)?;
 
     if let Some(name) = name {
         if !db.claim_session_for_delivery(session_id)? {
@@ -468,7 +473,7 @@ pub fn run_session(
 
         let messages = db.take_all_queued_messages(name)?;
         if messages.is_empty() {
-            let _ = db.update_session_status(session_id, final_status, exit_code);
+            update_session_status_with_retry(&db_path, session_id, final_status, exit_code)?;
         } else {
             let combined_prompt = messages
                 .iter()
@@ -487,13 +492,70 @@ pub fn run_session(
                 resume_cwd,
             ) {
                 Ok(_) | Err(_) => {
-                    let _ = db.update_session_status(session_id, final_status, exit_code);
+                    update_session_status_with_retry(
+                        &db_path,
+                        session_id,
+                        final_status,
+                        exit_code,
+                    )?;
                 }
             }
         }
     }
 
     Ok(())
+}
+
+fn update_session_status_with_retry(
+    db_path: &Path,
+    session_id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    update_session_status_with_retry_policy(
+        db_path,
+        session_id,
+        status,
+        exit_code,
+        SESSION_DB_WRITE_RETRIES,
+        SESSION_DB_WRITE_RETRY_DELAY,
+    )
+}
+
+fn update_session_status_with_retry_policy(
+    db_path: &Path,
+    session_id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    max_attempts: usize,
+    retry_delay: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut last_err: Option<rusqlite::Error> = None;
+
+    for attempt in 1..=max_attempts.max(1) {
+        match Db::open(db_path)?.update_session_status(session_id, status, exit_code) {
+            Ok(()) => return Ok(()),
+            Err(err) if is_retryable_sqlite_error(&err) && attempt < max_attempts.max(1) => {
+                last_err = Some(err);
+                std::thread::sleep(retry_delay);
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| SqliteError::InvalidQuery).into())
+}
+
+fn is_retryable_sqlite_error(err: &rusqlite::Error) -> bool {
+    match err {
+        SqliteError::SqliteFailure(code, _) => {
+            matches!(
+                code.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+        }
+        _ => false,
+    }
 }
 
 /// Check the log file for a dead session and update DB status accordingly.
@@ -961,6 +1023,52 @@ mod tests {
             resolve_resume_target(&[], "not-a-session", None, AgentBackend::Claude, dir.path())
                 .unwrap_err();
         assert!(err.contains("No session found"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_update_session_status_retries_through_temporary_db_lock() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("cq.db");
+        let db = Db::open(&db_path).unwrap();
+        db.create_session(
+            "locked-session",
+            AgentBackend::Claude,
+            Some("locked-session"),
+            Some("lock-test"),
+            "prompt",
+            tmp.path().to_str().unwrap(),
+            Some(1234),
+        )
+        .unwrap();
+        drop(db);
+
+        let lock_path = db_path.clone();
+        let lock_thread = std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(lock_path).unwrap();
+            conn.execute_batch("PRAGMA journal_mode=WAL; BEGIN EXCLUSIVE;")
+                .unwrap();
+            std::thread::sleep(Duration::from_secs(6));
+            conn.execute_batch("COMMIT;").unwrap();
+        });
+
+        std::thread::sleep(Duration::from_millis(200));
+
+        update_session_status_with_retry_policy(
+            &db_path,
+            "locked-session",
+            "completed",
+            Some(0),
+            2,
+            Duration::from_millis(200),
+        )
+        .unwrap();
+
+        lock_thread.join().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let session = db.find_session("locked-session").unwrap().unwrap();
+        assert_eq!(session.status, "completed");
+        assert_eq!(session._exit_code, Some(0));
     }
 
     struct EnvGuard {

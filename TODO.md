@@ -83,16 +83,6 @@ README is missing:
 
 Possible cause: resuming a session that's already at `last-prompt` state may cause Claude Code to spin. Or the session-id + new prompt combination creates an invalid state. Need to investigate how `claude -p --session-id X "new prompt"` behaves when the session is already terminated.
 
-## Bug: completed sessions stuck as "running"
-**Priority:** High — correctness
-
-**Repro:** `cq start --name studio-637-fix --cwd .../studio "fix CI..."` — the agent completed its work (produced full output via `cq tail`, pushed code to GitHub), but `cq list` still showed it as "running". The PID was gone (`ps aux | grep <session-id>` returned nothing). This led to a duplicate session being dispatched unnecessarily.
-
-Likely cause: the process exited but cq's background watcher didn't update the DB status. Could be a race in the wait/reap logic, or the watcher died before the session finished.
-
-Fix should cover two cases:
-1. **Session completed but status not updated** — ensure the wait loop always marks completion
-2. **Process actually died (crash/OOM/signal)** — `cq list`/`cq watch` should check `is_pid_alive()` (already exists) and mark dead sessions as "failed"
 
 ## `cq list` prompt column should truncate at first newline
 **Priority:** Low — UX
@@ -187,6 +177,7 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Supervisor LLM for auto-approving/denying tool calls~~
 - ~~Pending --wait: emit JSON mode~~
 - ~~Session status notification (`cq wait`)~~
+- ~~Bug: completed sessions stuck as "running"~~
 - ~~Approve with regex filter (`--match`)~~
 - ~~Supervisor audit log~~
 - ~~PR checks: branch protection requiring CI~~
