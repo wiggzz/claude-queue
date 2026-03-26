@@ -203,6 +203,7 @@ These would ideally run in CI using a mock or lightweight supervisor (no real LL
 - ~~Supervisor: omit agent prompt from context by default~~
 - ~~Bug: `cq result` returns resume response instead of original session output~~
 - ~~`cq tail` includes final stdout output for completed sessions~~
+- ~~Bug: `cq tail` sanitizes control characters in rendered output~~
 - ~~Bug: `cq pending` shows session IDs instead of names~~
 - ~~CLI: show effective config (`cq config show`)~~
 - ~~`cq list` prompt column should truncate at first newline~~

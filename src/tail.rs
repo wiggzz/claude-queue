@@ -1,4 +1,4 @@
-use crate::backend::AgentBackend;
+use crate::backend::{AgentBackend, sanitize_terminal_output};
 use crate::config;
 use crate::db::Db;
 use crate::format;
@@ -341,6 +341,15 @@ enum EventType {
     ToolResult { content: String, is_error: bool },
 }
 
+fn sanitize_tail_text(raw: &str) -> Option<String> {
+    let sanitized = sanitize_terminal_output(raw);
+    if sanitized.trim().is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
 /// Parse a JSONL line into a StreamEvent, or None if it's not interesting.
 fn parse_event(backend: AgentBackend, line: &str) -> Option<StreamEvent> {
     match backend {
@@ -370,18 +379,18 @@ fn parse_claude_event(line: &str) -> Option<StreamEvent> {
                 match block_type {
                     "text" => {
                         let text = block.get("text").and_then(|v| v.as_str())?;
-                        if !text.trim().is_empty() {
+                        if let Some(text) = sanitize_tail_text(text) {
                             return Some(StreamEvent {
-                                event_type: EventType::Text(text.to_string()),
+                                event_type: EventType::Text(text),
                                 timestamp: timestamp.clone(),
                             });
                         }
                     }
                     "thinking" => {
                         let thinking = block.get("thinking").and_then(|v| v.as_str())?;
-                        if !thinking.trim().is_empty() {
+                        if let Some(thinking) = sanitize_tail_text(thinking) {
                             return Some(StreamEvent {
-                                event_type: EventType::Thinking(thinking.to_string()),
+                                event_type: EventType::Thinking(thinking),
                                 timestamp: timestamp.clone(),
                             });
                         }
@@ -393,7 +402,9 @@ fn parse_claude_event(line: &str) -> Option<StreamEvent> {
                             .unwrap_or("unknown");
                         let input = block.get("input").cloned().unwrap_or(Value::Null);
                         let input_str = serde_json::to_string(&input).unwrap_or_default();
-                        let input_summary = format::format_tool_input(name, &input_str, 120);
+                        let input_summary = sanitize_terminal_output(&format::format_tool_input(
+                            name, &input_str, 120,
+                        ));
                         return Some(StreamEvent {
                             event_type: EventType::ToolUse {
                                 name: name.to_string(),
@@ -422,19 +433,18 @@ fn parse_claude_event(line: &str) -> Option<StreamEvent> {
                             .unwrap_or(false);
                         let content_text =
                             block.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                        return Some(StreamEvent {
-                            event_type: EventType::ToolResult {
-                                content: content_text.to_string(),
-                                is_error,
-                            },
-                            timestamp: timestamp.clone(),
-                        });
+                        if let Some(content) = sanitize_tail_text(content_text) {
+                            return Some(StreamEvent {
+                                event_type: EventType::ToolResult { content, is_error },
+                                timestamp: timestamp.clone(),
+                            });
+                        }
                     }
                     "text" => {
                         let text = block.get("text").and_then(|v| v.as_str())?;
-                        if !text.trim().is_empty() {
+                        if let Some(text) = sanitize_tail_text(text) {
                             return Some(StreamEvent {
-                                event_type: EventType::UserText(text.to_string()),
+                                event_type: EventType::UserText(text),
                                 timestamp: timestamp.clone(),
                             });
                         }
@@ -468,9 +478,9 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
                 match block.get("type").and_then(|v| v.as_str())? {
                     "text" => {
                         let text = block.get("text").and_then(|v| v.as_str())?;
-                        if !text.trim().is_empty() {
+                        if let Some(text) = sanitize_tail_text(text) {
                             return Some(StreamEvent {
-                                event_type: EventType::Text(text.to_string()),
+                                event_type: EventType::Text(text),
                                 timestamp: timestamp.clone(),
                             });
                         }
@@ -480,9 +490,9 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
                             .get("thinking")
                             .or_else(|| block.get("text"))
                             .and_then(|v| v.as_str())?;
-                        if !thinking.trim().is_empty() {
+                        if let Some(thinking) = sanitize_tail_text(thinking) {
                             return Some(StreamEvent {
-                                event_type: EventType::Thinking(thinking.to_string()),
+                                event_type: EventType::Thinking(thinking),
                                 timestamp: timestamp.clone(),
                             });
                         }
@@ -494,11 +504,11 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
                             .unwrap_or("unknown");
                         let args = block.get("arguments").cloned().unwrap_or(Value::Null);
                         let canonical = AgentBackend::Pi.canonicalize_tool_call(name, args).ok()?;
-                        let input_summary = format::format_tool_input(
+                        let input_summary = sanitize_terminal_output(&format::format_tool_input(
                             &canonical.tool_name,
                             &canonical.tool_input,
                             120,
-                        );
+                        ));
                         return Some(StreamEvent {
                             event_type: EventType::ToolUse {
                                 name: canonical.tool_name,
@@ -522,14 +532,10 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if text.trim().is_empty() {
-                None
-            } else {
-                Some(StreamEvent {
-                    event_type: EventType::UserText(text),
-                    timestamp,
-                })
-            }
+            sanitize_tail_text(&text).map(|text| StreamEvent {
+                event_type: EventType::UserText(text),
+                timestamp,
+            })
         }
         Some("toolResult") => {
             let is_error = message
@@ -547,11 +553,8 @@ fn parse_pi_event(line: &str) -> Option<StreamEvent> {
             } else {
                 text
             };
-            Some(StreamEvent {
-                event_type: EventType::ToolResult {
-                    content: preview,
-                    is_error,
-                },
+            sanitize_tail_text(&preview).map(|content| StreamEvent {
+                event_type: EventType::ToolResult { content, is_error },
                 timestamp,
             })
         }
@@ -1004,5 +1007,27 @@ mod tests {
                 "`/Users/wtj/src/github.com/wiggzz/claude-queue`".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_pi_event_sanitizes_control_characters_in_text() {
+        let line = serde_json::json!({
+            "type": "message",
+            "timestamp": "2026-03-12T14:20:39.514Z",
+            "message": {
+                "role": "assistant",
+                "content": [{
+                    "type": "text",
+                    "text": "hello\u{7}\u{1b}[2Jwor\u{8}ld\r\nnext\u{b}line"
+                }]
+            }
+        })
+        .to_string();
+
+        let event = parse_event(AgentBackend::Pi, &line).unwrap();
+        assert!(matches!(
+            event.event_type,
+            EventType::Text(ref text) if text == "hellowold\nnextline"
+        ));
     }
 }

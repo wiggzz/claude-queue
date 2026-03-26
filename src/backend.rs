@@ -58,7 +58,7 @@ impl AgentBackend {
     }
 
     pub fn extract_output(self, raw: &str) -> String {
-        sanitize_terminal_output(raw)
+        sanitize_terminal_output(raw).trim().to_string()
     }
 }
 
@@ -101,10 +101,14 @@ fn rename_key(map: &mut Map<String, Value>, from: &str, to: &str) {
     }
 }
 
-fn sanitize_terminal_output(raw: &str) -> String {
+pub(crate) fn sanitize_terminal_output(raw: &str) -> String {
     let without_ansi = strip_ansi_sequences(raw);
     let without_backspaces = apply_backspaces(&without_ansi);
-    without_backspaces.replace('\r', "").trim().to_string()
+    without_backspaces
+        .replace('\r', "")
+        .chars()
+        .filter(|ch| matches!(ch, '\n' | '\t') || !ch.is_control())
+        .collect()
 }
 
 fn strip_ansi_sequences(raw: &str) -> String {
@@ -180,5 +184,11 @@ mod tests {
     fn test_extract_output_strips_terminal_noise() {
         let raw = "^\u{8}D\u{8}\u{8}Hi!\r\n\u{1b}[?25h\u{1b}]9;4;0;\u{7}";
         assert_eq!(AgentBackend::Claude.extract_output(raw), "Hi!");
+    }
+
+    #[test]
+    fn test_extract_output_removes_remaining_control_characters() {
+        let raw = "ok\u{7}\u{b}\u{c}\u{1b}[2Jdone\u{7}";
+        assert_eq!(AgentBackend::Claude.extract_output(raw), "okdone");
     }
 }

@@ -321,6 +321,74 @@ printf 'pi:%s\n' "$prompt"
 }
 
 #[test]
+fn tail_sanitizes_control_characters_in_rendered_pi_output() {
+    let env = TestEnv::new(Some("pi"));
+    let fake_pi = env.install_script(
+        "pi",
+        r##"#!/bin/sh
+session_file=""
+prompt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --session)
+      session_file="$2"
+      shift 2
+      ;;
+    --extension)
+      shift 2
+      ;;
+    --print|--no-extensions)
+      shift
+      ;;
+    *)
+      prompt="$1"
+      shift
+      ;;
+  esac
+done
+
+mkdir -p "$(dirname "$session_file")"
+printf '%s\n' '{"type":"message","timestamp":"2026-03-12T14:20:39.000Z","message":{"role":"assistant","content":[{"type":"text","text":"hello\u0007\u001b[2Jwor\bld\r\nnext\u000bline"}]}}' >> "$session_file"
+
+printf 'final\a\033[2Jwor\bld\r\nnext\vline\n'
+"##,
+    );
+
+    let output = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["start", "tail control", "--name", "tail-control-task"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+
+    let wait = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["wait", "tail-control-task"])
+        .output()
+        .unwrap();
+    assert!(wait.status.success(), "{wait:?}");
+
+    let tail = env
+        .command()
+        .env("CQ_PI_BIN", &fake_pi)
+        .args(["tail", "tail-control-task"])
+        .output()
+        .unwrap();
+    assert!(tail.status.success(), "{tail:?}");
+
+    let stdout = String::from_utf8_lossy(&tail.stdout);
+    assert!(stdout.contains("hellowold"), "{stdout}");
+    assert!(stdout.contains("nextline"), "{stdout}");
+    assert!(stdout.contains("finalwold"), "{stdout}");
+    assert!(!stdout.contains("\u{7}"), "{stdout}");
+    assert!(!stdout.contains("\u{8}"), "{stdout}");
+    assert!(!stdout.contains("\u{b}"), "{stdout}");
+    assert!(!stdout.contains("\u{1b}[2J"), "{stdout}");
+}
+
+#[test]
 fn claude_backend_arg_routes_through_claude_hook() {
     let env = TestEnv::new(None);
     let fake_claude = env.install_script(
