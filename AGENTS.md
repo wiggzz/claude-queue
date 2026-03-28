@@ -10,7 +10,7 @@ Always use a red-green loop to write tests. A test which does not fail for the r
 
 ## AI Attribution
 
-Always note that any generated text or content is AI generated (like git commits, PR descriptions, PR comments or any external interactions). 
+Always note that any generated text or content is AI generated (like git commits, PR descriptions, PR comments or any external interactions).
 
 ## Before pushing
 
@@ -25,3 +25,7 @@ cargo test
 Fix any issues before pushing.
 
 Commit using conventional commits.
+
+## Tracking work
+
+The TODO.md is the source of truth for feature requests. Add new requests there, keep the list prioritized, and keep it up to date with commits that implement features.
