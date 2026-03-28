@@ -17,6 +17,22 @@ Or build from source:
 cargo install --path .
 ```
 
+## Prerequisites
+
+- Rust and Cargo if you are building from source
+- A recent Claude Code CLI installation, since `cq` launches and manages `claude -p` sessions
+- A Claude account / Claude Code setup if you want to run real sub-agents
+
+For context on Claude Code itself, see [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview).
+
+### Rust toolchain note
+
+This project uses the Rust 2024 edition, so use a reasonably recent stable toolchain. If your local Rust is old, upgrade first:
+
+```sh
+rustup update stable
+```
+
 ## Usage
 
 ```
@@ -58,6 +74,16 @@ cq audit --json     # machine-readable
 ## How it works
 
 Sub-agents run as `claude -p` processes with a PreToolUse hook that intercepts every tool call. Read-only tools (Read, Glob, Grep) are auto-approved by default. Everything else blocks until you approve or deny via `cq approve`/`cq deny`.
+
+## `cq watch`
+
+`cq watch` is the at-a-glance dashboard for active work. It continuously refreshes to show:
+
+- each session's current status
+- which sessions are waiting on approvals
+- recent completions without keeping long-finished sessions on screen forever
+
+Use it when you want a lightweight overview of multiple agents at once. Drop down to `cq pending` for approval details, `cq tail <name>` for one session's transcript, and `cq audit --follow` for the full stream of tool-call decisions.
 
 ## Policies
 
@@ -158,5 +184,17 @@ cq audit --follow
 ```
 
 **Note:** If you use `.cq/config.json` for project-level policies, copy it to each worktree — worktrees don't share untracked files.
+
+## Contributing
+
+Contributions are welcome. For small changes, open a PR with a clear description, keep commits focused, and run the local checks before pushing:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets
+cargo test
+```
+
+If you are changing agent workflows or approval behavior, update the README / docs in the same PR so usage stays accurate.
 
 Run `cq --help` for full details.
