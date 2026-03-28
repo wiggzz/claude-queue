@@ -8,6 +8,10 @@
 
 Always use a red-green loop to write tests. A test which does not fail for the right reason before turning green is useless - it may not work, it may pass trivially. Ensure that tests fail for the right reason before committing them. If you need to, comment out or delete relevant code and ensure the tests fail for the expected reason before writing or bringing back the code and checking that they pass.
 
+## AI Attribution
+
+Always note that any generated text or content is AI generated (like git commits, PR descriptions, PR comments or any external interactions). 
+
 ## Before pushing
 
 Always run all CI checks locally before pushing:
