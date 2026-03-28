@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.11.3](https://github.com/wiggzz/claude-queue/compare/v0.11.2...v0.11.3) (2026-03-28)
+
+
+### Bug Fixes
+
+* avoid false session failures after quiet exits ([#49](https://github.com/wiggzz/claude-queue/issues/49)) ([f2df27b](https://github.com/wiggzz/claude-queue/commit/f2df27b18083a2b4738035e1a834b89e20363e03))
+* persist session completion status reliably ([#48](https://github.com/wiggzz/claude-queue/issues/48)) ([49c6300](https://github.com/wiggzz/claude-queue/commit/49c630053a04ee96edff654c08454d232f162298))
+
 ## [0.11.2](https://github.com/wiggzz/claude-queue/compare/v0.11.1...v0.11.2) (2026-03-26)
 
 
