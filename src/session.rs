@@ -454,11 +454,7 @@ pub fn run_session(
     let (final_status, exit_code) = match child.wait() {
         Ok(status) => {
             let code = status.code();
-            let session_status = if code == Some(0) {
-                "completed"
-            } else {
-                "failed"
-            };
+            let session_status = classify_terminal_status(code, &log_path, &stderr_path);
             (session_status, code)
         }
         Err(_) => ("failed", None),
@@ -562,27 +558,48 @@ fn is_retryable_sqlite_error(err: &rusqlite::Error) -> bool {
 pub fn resolve_dead_session(db: &crate::db::Db, session_id: &str) -> String {
     let log_path = config::log_dir().join(format!("{session_id}.log"));
     let stderr_path = config::log_dir().join(format!("{session_id}.stderr"));
-    let status = if let Ok(content) = fs::read_to_string(&log_path) {
-        if !content.trim().is_empty() {
-            let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-            if stderr.contains("Error:") {
-                "failed"
-            } else {
-                "completed"
-            }
-        } else {
-            let stderr = fs::read_to_string(&stderr_path).unwrap_or_default();
-            if stderr.trim().is_empty() {
-                "completed"
-            } else {
-                "failed"
-            }
-        }
-    } else {
-        "failed"
-    };
+    let status = classify_terminal_status(None, &log_path, &stderr_path);
     let _ = db.update_session_status(session_id, status, None);
     status.to_string()
+}
+
+fn classify_terminal_status(
+    exit_code: Option<i32>,
+    log_path: &Path,
+    stderr_path: &Path,
+) -> &'static str {
+    if exit_code == Some(0) {
+        return "completed";
+    }
+
+    let log = fs::read_to_string(log_path).ok();
+    let stderr = fs::read_to_string(stderr_path).unwrap_or_default();
+    infer_status_from_artifacts(log.as_deref(), &stderr)
+}
+
+fn infer_status_from_artifacts(log: Option<&str>, stderr: &str) -> &'static str {
+    let has_log_output = log.is_some_and(|content| !content.trim().is_empty());
+    let stderr_trimmed = stderr.trim();
+
+    if has_log_output {
+        if stderr_looks_fatal(stderr_trimmed) {
+            "failed"
+        } else {
+            "completed"
+        }
+    } else if stderr_trimmed.is_empty() {
+        "completed"
+    } else {
+        "failed"
+    }
+}
+
+fn stderr_looks_fatal(stderr: &str) -> bool {
+    let stderr_lower = stderr.to_ascii_lowercase();
+    stderr_lower.contains("error:")
+        || stderr_lower.contains("fatal:")
+        || stderr_lower.contains("panic")
+        || stderr_lower.contains("exception")
 }
 
 pub fn get_output(session_id: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -1069,6 +1086,22 @@ mod tests {
         let session = db.find_session("locked-session").unwrap().unwrap();
         assert_eq!(session.status, "completed");
         assert_eq!(session._exit_code, Some(0));
+    }
+
+    #[test]
+    fn test_infer_status_from_artifacts_treats_output_only_nonzero_exit_as_completed() {
+        assert_eq!(
+            infer_status_from_artifacts(Some("finished command"), ""),
+            "completed"
+        );
+    }
+
+    #[test]
+    fn test_infer_status_from_artifacts_treats_error_stderr_as_failed() {
+        assert_eq!(
+            infer_status_from_artifacts(Some("finished command"), "Fatal: backend crashed"),
+            "failed"
+        );
     }
 
     struct EnvGuard {

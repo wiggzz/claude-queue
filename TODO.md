@@ -52,10 +52,12 @@ Currently the supervisor calls `claude -p` which has CLI startup overhead on eve
 
 **Symptom:** a session ran `corepack pnpm lint` (via `turbo run lint`) for ~25 minutes and the command completed, producing only a Node deprecation warning. The agent then emitted a thinking entry, produced no further output for ~24 minutes, and the session was marked as failed. No explicit error was reported.
 
-Need:
-- a reliable repro
-- root cause investigation into why the session transitions to failed after long quiet periods
-- determine whether this is a Claude/backend behavior, cq timeout/status logic, or log/exit-code interpretation
+Status update:
+- added a deterministic reproducer in `tests/backend_e2e.rs` where the backend emits normal output, stays quiet, then exits non-zero
+- narrowed likely root cause to backend/CLI exit semantics after successful transcript output rather than cq's own inactivity timeout logic
+- `cq` now classifies such runs from transcript/stderr artifacts instead of trusting a lone non-zero exit code
+
+Still worth checking with a real Claude repro whether the backend is exiting non-zero after idle/thinking periods, and if so why.
 
 ## Bug: Claude Code permissions not mapping correctly to cq policy
 **Priority:** High — correctness
