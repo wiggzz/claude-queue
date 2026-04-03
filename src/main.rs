@@ -8,8 +8,10 @@ mod format;
 mod hook;
 mod policy;
 mod session;
+mod suggest;
 mod supervisor;
 mod tail;
+mod tui;
 mod update;
 mod watch;
 
@@ -719,6 +721,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Watch { all } => {
             watch::run(all)?;
+        }
+
+        Commands::Tui => {
+            tui::run()?;
         }
 
         Commands::Sessions { command } => {
