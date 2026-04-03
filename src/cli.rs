@@ -202,6 +202,8 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
+    /// Interactive TUI for approving/denying pending tool calls
+    Tui,
     /// Discover and search non-cq-managed Claude Code sessions (Claude-only)
     Sessions {
         #[command(subcommand)]
